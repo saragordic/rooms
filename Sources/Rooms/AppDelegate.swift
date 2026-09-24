@@ -26,6 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let defaults = UserDefaults.standard
     private var rooms: [Room] = []
     private var loadError: String?
+    private var launched = false
+    private var pendingURLs: [URL] = []
 
     private var currentRoomID: String? {
         get { defaults.string(forKey: "currentRoom") }
@@ -134,6 +136,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             showWelcome()
         }
         Log.app.info("Rooms started with \(self.rooms.count) rooms")
+        do {
+            try PresetCatalog { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil }.save()
+        } catch {
+            Log.file("Couldn't write presets.json: \(error.localizedDescription)")
+        }
+        launched = true
+        let queued = pendingURLs
+        pendingURLs = []
+        queued.forEach(handle)
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard launched else {
+            pendingURLs += urls
+            return
+        }
+        urls.forEach(handle)
+    }
+
+    private func handle(_ url: URL) {
+        guard let command = RoomsCommand(url: url) else {
+            Log.file("Ignored URL \(url.absoluteString)")
+            return
+        }
+        reloadRooms()
+        switch command {
+        case .walk(let key, let layout):
+            guard var room = Room.find(key, in: rooms) else {
+                toast.show("There's no room called “\(key)”", detail: loadError)
+                return
+            }
+            if let layout {
+                setLayout(layout, for: room)
+                room = rooms.first { $0.id == room.id } ?? room
+            }
+            palette.hide()
+            inTurn { await self.walk(into: room) }
+        case .showEverything:
+            showAll()
+        case .palette:
+            palette.show()
+        case .newRoom(let name):
+            openPicker(name: name)
+        case .addPreset(let id):
+            guard let preset = RoomPreset.named(id) else {
+                toast.show("There's no preset called “\(id)”")
+                return
+            }
+            _ = addPreset(preset)
+        }
     }
 
     /// A menu bar app has no menu of its own, and without one ⌘V, ⌘C, ⌘A and ⌘Z do
@@ -646,9 +698,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openPalette() { palette.show() }
 
     @objc private func showWelcome() {
-        welcome.show(shortcut: HotkeyCenter.shared.current?.label ?? Shortcut.optionSpace.label, needsAccess: !AX.isTrusted) {
+        welcome.show(shortcut: HotkeyCenter.shared.current?.label ?? Shortcut.optionSpace.label, needsAccess: !AX.isTrusted,
+                     presets: RoomPreset.all.map { ($0, $0.isAdded(to: rooms)) },
+                     onAddPreset: { [unowned self] preset in addPreset(preset) }) {
             AX.requestTrust()
             AX.openAccessibilitySettings()
+        }
+    }
+
+    private func addPreset(_ preset: RoomPreset) -> Bool {
+        reloadRooms()
+        guard loadError == nil else {
+            alert("rooms.json has a problem", loadError ?? "")
+            return false
+        }
+        guard let room = preset.room(existing: rooms, isInstalled: { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) != nil }) else {
+            toast.show(preset.isAdded(to: rooms) ? "You already have a \(preset.name) room" : "None of \(preset.name)'s apps are installed")
+            return preset.isAdded(to: rooms)
+        }
+        let all = rooms + [room]
+        do {
+            try RoomStore.save(all, to: RoomStore.defaultURL)
+            rooms = all
+            registerRoomKeys()
+            Log.file("Added preset \(room.name): " + room.windows.map { $0.app ?? $0.bundleID }.joined(separator: ", "))
+            let apps = room.windows.compactMap(\.app).joined(separator: ", ")
+            let key = HotkeyCenter.shared.current?.label ?? Shortcut.optionSpace.label
+            toast.show("Added \(room.name) · \(apps)", detail: "Choose it in \(key) to open its apps and lay them out")
+            return true
+        } catch {
+            alert("Couldn't add the room", error.localizedDescription)
+            return false
         }
     }
 

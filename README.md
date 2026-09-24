@@ -34,6 +34,8 @@ Rooms needs **Accessibility** access to move windows. Turn it on in **System Set
 3. Click the windows that belong in it. The number on a card is its place in the layout, and 1 is the main window. Then **Create Room**.
 4. **Press Tab to change the layout.** In ⌥Space, select the room and press Tab (⇧Tab goes back): the preview shows each layout that fits your screen, and the room remembers the one you pick.
 
+Or start from a preset on the welcome screen: **Meetings** puts Zoom (or Teams) across the top half, with Notes and Safari side by side below.
+
 The windows come to the screen you're on and lay themselves out. From then on, ⌥Space and the room's name (or ⌃⌥1–9) brings it back. **Getting Started** in the menu shows these steps again.
 
 ## Around the rooms
@@ -44,6 +46,7 @@ The windows come to the screen you're on and lay themselves out. From then on, �
 - **Rooms learn.** Arrange the windows how you like and press **⌘S**: Rooms recognises the layout and tidies it, or keeps your arrangement exactly.
 - **Edit, rename, delete.** Right-click a room in ⌥Space (or use the menu for the room you're in) to choose its windows again and rename it. Delete a room with the ⓧ on its row, a right-click, or **⌘⌫** in ⌥Space, and **⌘Z** brings it back. Deleting a room never touches its windows.
 - **Direct keys.** ⌃⌥1–9 jump straight into a room; ⌘1–9 in ⌥Space gives the selected room its number.
+- **From other apps** (Raycast, Shortcuts, scripts): open `rooms://room/<id>` to walk into a room (the `id` from rooms.json, or its name), add `?layout=grid` (`auto`, `focus`, `stack`, `columns`, `grid`, `mine`, `saved`) to change its layout on this display first, or open `rooms://show-everything` or `rooms://palette`. `rooms://new?name=Design` opens the window picker for a new room, and `rooms://preset/meetings` adds a preset (listed in `presets.json`, next to rooms.json).
 - **Window snapping** for the window you're in, with the same gaps as rooms: halves ⌃⌥←→↑↓ (press ← or → again for ⅔, then ⅓), quarters ⌃⌥UIJK, thirds ⌃⌥DFG, two-thirds ⌃⌥ET, maximize ⌃⌥↩, center ⌃⌥C, restore ⌃⌥⌫, other display ⌃⌥⌘←→.
 
 ## Nothing closes
