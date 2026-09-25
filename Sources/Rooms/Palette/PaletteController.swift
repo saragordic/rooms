@@ -9,6 +9,8 @@ final class PaletteController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
     var loadError: () -> String? = { nil }
     var recency: () -> [String: Date] = { [:] }
     var currentRoomID: () -> String? = { nil }
+    /// Rooms out on another display (choosing one brings it here).
+    var elsewhere: () -> Set<String> = { [] }
     var willShow: () -> Void = {}
     var onChoose: (Room) -> Void = { _ in }
     var onSave: (String) -> Void = { _ in }
@@ -211,6 +213,7 @@ final class PaletteController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
             let all = rooms()
             let matches = Matcher.rank(query, rooms: all, recency: recency()).prefix(maxRows)
             let current = currentRoomID()
+            let away = elsewhere()
             for match in matches {
                 let room = match.room
                 let index = rows.count
@@ -223,7 +226,7 @@ final class PaletteController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
                 for id in room.windows.map(\.bundleID) + room.apps.map(\.bundleID) where !bundles.contains(id) { bundles.append(id) }
                 items.append(.room(room))
                 rows.append(ResultRow(title: room.name, detail: detail, icons: bundles.compactMap(icon),
-                                      accessory: Optional([room.id == current ? "Current" : nil, shortcutFor(room).map { "⌃⌥\($0)" }]
+                                      accessory: Optional([room.id == current ? "Current" : away.contains(room.id) ? "Other display" : nil, shortcutFor(room).map { "⌃⌥\($0)" }]
                                           .compactMap { $0 }.joined(separator: "   ")).flatMap { $0.isEmpty ? nil : $0 }, interactive: true))
                 rows[index].onDelete = { [weak self] in self?.delete(room) }
                 rows[index].onEdit = { [weak self] in
