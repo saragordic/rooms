@@ -10,6 +10,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let toast = Toast()
     private let picker = RoomPicker()
     private let welcome = Welcome()
+    private let shortcutChooser = ShortcutChooser()
+    private var paletteShortcut = PaletteShortcut.optionSpace
+    private var paletteReady = false
+    private var paletteProblem: String?
     private var lastScreens: [CGRect] = []
     private var displayWork: DispatchWorkItem?
     private var registeredRoomKeys: [Int] = []
@@ -123,15 +127,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Plugging in (or unplugging) a monitor re-lays out the room you're in.
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         lastScreens = NSScreen.screens.map(\.frame)
-        let shortcut = Shortcut.named(defaults.string(forKey: "shortcut"))
-        if !HotkeyCenter.shared.register(shortcut) { warnShortcutTaken(shortcut) }
+        paletteShortcut = PaletteShortcut.load(
+            keyCode: defaults.object(forKey: "shortcutKeyCode") as? Int,
+            modifiers: defaults.object(forKey: "shortcutModifiers") as? Int,
+            legacyID: defaults.string(forKey: "shortcut"))
+        if let problem = commitPalette(paletteShortcut) {
+            paletteProblem = problem == "Already in use"
+                ? "\(paletteShortcut.label) is already used by another app."
+                : problem
+        }
 
         // If Rooms quit unexpectedly with windows parked, bring them back now.
         recoverIfNeeded()
         // Until the first room exists, opening Rooms explains how to start.
         if rooms.isEmpty || !defaults.bool(forKey: "welcomed") {
             defaults.set(true, forKey: "welcomed")
-            showWelcome()
+            presentWelcome()
+        } else if paletteProblem != nil {
+            presentChooser()
         }
         Log.app.info("Rooms started with \(self.rooms.count) rooms")
     }
@@ -621,16 +634,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(item("Edit Rooms…", #selector(editRooms), key: ","))
 
-        let shortcuts = NSMenu()
-        for s in Shortcut.all {
-            let entry = item(s.label, #selector(chooseShortcut(_:)))
-            entry.representedObject = s.id
-            entry.state = HotkeyCenter.shared.current == s ? .on : .off
-            shortcuts.addItem(entry)
-        }
-        let shortcutItem = NSMenuItem(title: "Keyboard Shortcut", action: nil, keyEquivalent: "")
-        shortcutItem.submenu = shortcuts
-        menu.addItem(shortcutItem)
+        menu.addItem(item("Keyboard Shortcut…", #selector(editShortcut)))
 
         if !rooms.isEmpty { menu.addItem(item("Getting Started", #selector(showWelcome))) }   // otherwise it leads the menu
         menu.addItem(.separator())
@@ -645,10 +649,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openPalette() { palette.show() }
 
-    @objc private func showWelcome() {
-        welcome.show(shortcut: HotkeyCenter.shared.current?.label ?? Shortcut.optionSpace.label, needsAccess: !AX.isTrusted) {
-            AX.requestTrust()
-            AX.openAccessibilitySettings()
+    @objc private func showWelcome() { presentWelcome() }
+
+    @objc private func editShortcut() { presentChooser() }
+
+    private func presentWelcome() {
+        shortcutChooser.close()
+        welcome.show(
+            shortcut: paletteReady ? paletteShortcut : nil,
+            conflict: paletteProblem,
+            needsAccess: !AX.isTrusted,
+            reserved: paletteReservations(),
+            register: { [unowned self] in self.commitPalette($0) },
+            suspend: { HotkeyCenter.shared.unregisterPalette() },
+            restore: { [unowned self] in self.restorePalette() },
+            onAllow: {
+                AX.requestTrust()
+                AX.openAccessibilitySettings()
+            }
+        )
+    }
+
+    private func presentChooser() {
+        welcome.close()
+        shortcutChooser.show(
+            shortcut: paletteReady ? paletteShortcut : nil,
+            conflict: paletteProblem,
+            reserved: paletteReservations(),
+            register: { [unowned self] in self.commitPalette($0) },
+            suspend: { HotkeyCenter.shared.unregisterPalette() },
+            restore: { [unowned self] in self.restorePalette() }
+        )
+    }
+
+    private func paletteReservations() -> [PaletteShortcut: String] {
+        var map: [PaletteShortcut: String] = [:]
+        for n in 1...9 {
+            map[PaletteShortcut(Shortcut.room(n))] = "Rooms uses this to open a room"
+        }
+        if snapKeysOn {
+            for binding in SnapBinding.all {
+                map[PaletteShortcut(binding.shortcut)] = "Rooms uses this for window snapping"
+            }
+        }
+        return map
+    }
+
+    private func commitPalette(_ shortcut: PaletteShortcut) -> String? {
+        if let reason = shortcut.rejection(reserved: paletteReservations()) { return reason }
+        guard HotkeyCenter.shared.register(Shortcut(shortcut)) else { return "Already in use" }
+        defaults.set(Int(shortcut.keyCode), forKey: "shortcutKeyCode")
+        defaults.set(Int(shortcut.modifiers.rawValue), forKey: "shortcutModifiers")
+        defaults.removeObject(forKey: "shortcut")
+        paletteShortcut = shortcut
+        paletteReady = true
+        paletteProblem = nil
+        return nil
+    }
+
+    private func restorePalette() {
+        guard paletteReady else { return }
+        if !HotkeyCenter.shared.register(Shortcut(paletteShortcut)) {
+            paletteReady = false
+            paletteProblem = "\(paletteShortcut.label) is already used by another app."
         }
     }
 
@@ -688,21 +751,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open([RoomStore.defaultURL], withApplicationAt: textEdit, configuration: NSWorkspace.OpenConfiguration())
     }
 
-    @objc private func chooseShortcut(_ sender: NSMenuItem) {
-        let shortcut = Shortcut.named(sender.representedObject as? String)
-        if HotkeyCenter.shared.register(shortcut) {
-            defaults.set(shortcut.id, forKey: "shortcut")
-        } else {
-            warnShortcutTaken(shortcut)
-            HotkeyCenter.shared.register(Shortcut.named(defaults.string(forKey: "shortcut")))
-        }
-    }
-
-    private func warnShortcutTaken(_ shortcut: Shortcut) {
-        let alert = NSAlert()
-        alert.messageText = "\(shortcut.label) is already in use"
-        alert.informativeText = "Another app has claimed this shortcut. Choose a different one from Keyboard Shortcut in the Rooms menu."
-        NSApp.activate()
-        alert.runModal()
-    }
 }

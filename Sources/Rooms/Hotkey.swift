@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import RoomsCore
 
 /// A global keyboard shortcut. Carbon hot keys need no permission prompt.
 struct Shortcut: Equatable, Sendable {
@@ -7,13 +8,6 @@ struct Shortcut: Equatable, Sendable {
     let keyCode: UInt32
     let modifiers: UInt32
     let label: String
-
-    static let optionSpace = Shortcut(id: "option-space", keyCode: UInt32(kVK_Space), modifiers: UInt32(optionKey), label: "⌥ Space")
-    static let controlOptionSpace = Shortcut(id: "control-option-space", keyCode: UInt32(kVK_Space), modifiers: UInt32(controlKey | optionKey), label: "⌃⌥ Space")
-    static let controlOptionR = Shortcut(id: "control-option-r", keyCode: UInt32(kVK_ANSI_R), modifiers: UInt32(controlKey | optionKey), label: "⌃⌥ R")
-
-    static let all = [optionSpace, controlOptionSpace, controlOptionR]
-    static func named(_ id: String?) -> Shortcut { all.first { $0.id == id } ?? optionSpace }
 
     /// ⌃⌥1 … ⌃⌥9: straight into a room.
     static func room(_ n: Int) -> Shortcut {
@@ -50,6 +44,12 @@ final class HotkeyCenter {
         paletteRef = ref
         current = shortcut
         return true
+    }
+
+    func unregisterPalette() {
+        if let paletteRef { UnregisterEventHotKey(paletteRef) }
+        paletteRef = nil
+        current = nil
     }
 
     /// Registers ⌃⌥n for each digit given; returns the digits macOS refused.
@@ -103,5 +103,32 @@ final class HotkeyCenter {
             }
             return noErr
         }, 1, &spec, nil, &handler)
+    }
+}
+
+extension PaletteShortcut {
+    init(_ shortcut: Shortcut) {
+        var modifiers = Modifiers()
+        let raw = shortcut.modifiers
+        if raw & UInt32(controlKey) != 0 { modifiers.insert(.control) }
+        if raw & UInt32(optionKey) != 0 { modifiers.insert(.option) }
+        if raw & UInt32(shiftKey) != 0 { modifiers.insert(.shift) }
+        if raw & UInt32(cmdKey) != 0 { modifiers.insert(.command) }
+        self.init(keyCode: UInt16(truncatingIfNeeded: shortcut.keyCode), modifiers: modifiers)
+    }
+
+    var carbonModifiers: UInt32 {
+        var raw: UInt32 = 0
+        if modifiers.contains(.control) { raw |= UInt32(controlKey) }
+        if modifiers.contains(.option) { raw |= UInt32(optionKey) }
+        if modifiers.contains(.shift) { raw |= UInt32(shiftKey) }
+        if modifiers.contains(.command) { raw |= UInt32(cmdKey) }
+        return raw
+    }
+}
+
+extension Shortcut {
+    init(_ palette: PaletteShortcut) {
+        self.init(id: "palette", keyCode: UInt32(palette.keyCode), modifiers: palette.carbonModifiers, label: palette.label)
     }
 }
