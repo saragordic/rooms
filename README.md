@@ -8,9 +8,9 @@ nothing is ever closed.
 
 ![The Rooms switcher over a tidy desk, listing four rooms: Design, Build, Deep Work and Morning](docs/hero.jpg)
 
-https://github.com/user-attachments/assets/9b9c2103-22de-4aed-b69a-d6d1c2c324e5
+https://github.com/user-attachments/assets/70a207a0-72cd-42fc-9d75-8060b9c94516
 
-
+[See Rooms in action on X →](https://x.com/saragordic/status/2102463848670511273)
 
 ## Get it
 
