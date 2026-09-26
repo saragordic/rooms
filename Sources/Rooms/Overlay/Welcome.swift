@@ -1,4 +1,5 @@
 import AppKit
+import RoomsCore
 
 /// The first thing a new user sees: what Rooms is and the three steps to a first
 /// room. Shown on launch until a room exists; also available from Getting Started.
@@ -9,8 +10,11 @@ final class Welcome: NSObject {
 
     /// `shortcut`: the palette key as shown ("⌥ Space"). `needsAccess`: Accessibility
     /// isn't allowed yet, so the main button asks for it first.
-    func show(shortcut: String, needsAccess: Bool, onAllow: @escaping () -> Void) {
+    func show(shortcut: String, needsAccess: Bool, presets: [(preset: RoomPreset, added: Bool)] = [],
+              onAddPreset: @escaping (RoomPreset) -> Bool = { _ in false }, onAllow: @escaping () -> Void) {
         self.onAllow = onAllow
+        self.presets = presets
+        self.onAddPreset = onAddPreset
         let panel = makePanel(shortcut: shortcut, needsAccess: needsAccess)
         self.panel?.orderOut(nil)
         self.panel = panel
@@ -30,6 +34,8 @@ final class Welcome: NSObject {
     }
 
     private var onAllow: () -> Void = {}
+    private var onAddPreset: (RoomPreset) -> Bool = { _ in false }
+    private var presets: [(preset: RoomPreset, added: Bool)] = []
 
     @objc private func startClicked() { panel?.orderOut(nil) }
 
@@ -71,6 +77,10 @@ final class Welcome: NSObject {
                           size: 14, weight: .regular, color: .secondaryLabelColor)
 
         var views: [NSView] = [title, intro, steps, after]
+        if !presets.isEmpty {
+            views.append(label("Or start from a preset", size: 14, weight: .semibold, color: .labelColor))
+            views.append(contentsOf: presets.indices.map(presetRow))
+        }
         if needsAccess {
             views.append(label("Rooms needs Accessibility access to move windows. Nothing leaves your Mac.",
                                size: 14, weight: .semibold, color: .labelColor))
@@ -137,6 +147,47 @@ final class Welcome: NSObject {
         return panel
     }
 
+    @objc private func addPresetClicked(_ sender: NSButton) {
+        guard presets.indices.contains(sender.tag), onAddPreset(presets[sender.tag].preset) else { return }
+        presets[sender.tag].added = true
+        markAdded(sender)
+    }
+
+    private func markAdded(_ button: NSButton) {
+        button.title = "Added"
+        button.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)
+        button.imagePosition = .imageLeading
+        button.isEnabled = false
+    }
+
+    private func presetRow(_ i: Int) -> NSView {
+        let preset = presets[i].preset
+        let thumbnail = PresetThumbnail(slots: preset.slots)
+        thumbnail.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            thumbnail.widthAnchor.constraint(equalToConstant: 96),
+            thumbnail.heightAnchor.constraint(equalToConstant: 60),
+        ])
+        let name = label(preset.name, size: 14, weight: .semibold, color: .labelColor)
+        let summary = label(preset.summary, size: 12, weight: .regular, color: .secondaryLabelColor)
+        let text = NSStackView(views: [name, summary])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 2
+        text.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let add = NSButton(title: "Add Room", target: self, action: #selector(addPresetClicked(_:)))
+        add.bezelStyle = .push
+        add.tag = i
+        add.setContentHuggingPriority(.required, for: .horizontal)
+        add.setContentCompressionResistancePriority(.required, for: .horizontal)
+        if presets[i].added { markAdded(add) }
+        let row = NSStackView(views: [thumbnail, text, add])
+        row.alignment = .centerY
+        row.spacing = 12
+        return row
+    }
+
     private func step(_ n: Int, _ text: String) -> NSView {
         let number = label("\(n)", size: 14, weight: .semibold, color: .controlAccentColor)
         number.alignment = .center
@@ -162,4 +213,47 @@ private final class WelcomePanel: NSPanel {
     var onCancel: () -> Void = {}
     override var canBecomeKey: Bool { true }
     override func cancelOperation(_ sender: Any?) { onCancel() }
+}
+
+private final class PresetThumbnail: NSView {
+    private let panes: [(cell: GridCell, icon: NSImage?)]
+
+    init(slots: [RoomPreset.Slot]) {
+        panes = slots.map { slot in
+            let url = slot.candidates.lazy.compactMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0.bundleID) }.first
+            return (slot.cell, url.map { NSWorkspace.shared.icon(forFile: $0.path) })
+        }
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let screen = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 8, yRadius: 8)
+        NSColor.secondaryLabelColor.withAlphaComponent(0.14).setFill()
+        screen.fill()
+        NSColor.secondaryLabelColor.withAlphaComponent(0.3).setStroke()
+        screen.lineWidth = 1
+        screen.stroke()
+        let gap: CGFloat = 3
+        let area = bounds.insetBy(dx: gap, dy: gap)
+        let unitW = (area.width + gap) / CGFloat(GridLayout.units)
+        let unitH = (area.height + gap) / CGFloat(GridLayout.units)
+        for (c, icon) in panes {
+            let r = NSRect(x: area.minX + CGFloat(c.col) * unitW, y: area.minY + CGFloat(c.row) * unitH,
+                           width: CGFloat(c.cols) * unitW - gap, height: CGFloat(c.rows) * unitH - gap)
+            let pane = NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+            NSColor.white.withAlphaComponent(0.5).setFill()
+            pane.fill()
+            NSColor.white.withAlphaComponent(0.8).setStroke()
+            pane.lineWidth = 1
+            pane.stroke()
+            guard let icon else { continue }
+            let side = min(18, min(r.width, r.height) - 4)
+            icon.draw(in: NSRect(x: r.midX - side / 2, y: r.midY - side / 2, width: side, height: side),
+                      from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        }
+    }
 }
