@@ -27,9 +27,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var rooms: [Room] = []
     private var loadError: String?
 
-    private var currentRoomID: String? {
-        get { defaults.string(forKey: "currentRoom") }
-        set { defaults.set(newValue, forKey: "currentRoom") }
+    /// Which room is out on which display, and the one you walked into last.
+    private var desk: Desk {
+        get { Desk(rooms: defaults.dictionary(forKey: "roomByDisplay") as? [String: String] ?? [:], current: defaults.string(forKey: "currentRoom")) }
+        set {
+            defaults.set(newValue.rooms, forKey: "roomByDisplay")
+            defaults.set(newValue.current, forKey: "currentRoom")
+        }
+    }
+
+    private var currentRoomID: String? { desk.current }
+
+    /// The room out on the display you're on (or, before any room has a display, the
+    /// room you're in), and the rooms out on the others.
+    private func roomsHere() -> (here: String?, elsewhere: Set<String>) {
+        let desk = desk
+        guard !desk.rooms.isEmpty else { return (desk.current, []) }
+        let display = engine.activeScreenUUID()
+        let connected = ScreenInfo.all().map(\.uuid)
+        return (desk.rooms[display], Set(desk.others(than: display, connected: connected).values))
     }
 
     private var recency: [String: Date] {
@@ -45,7 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         palette.rooms = { [unowned self] in rooms }
         palette.loadError = { [unowned self] in loadError }
         palette.recency = { [unowned self] in recency }
-        palette.currentRoomID = { [unowned self] in currentRoomID }
+        palette.currentRoomID = { [unowned self] in roomsHere().here }
+        palette.elsewhere = { [unowned self] in roomsHere().elsewhere }
         palette.willShow = { [unowned self] in
             reloadRooms()
             recoverIfNeeded()
@@ -209,7 +226,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !room.windows.isEmpty, !AX.isTrusted {
             askForAccessibility(reason: "to put \(room.name)'s windows back in place. Until then, Rooms switches whole apps.")
         }
-        let report = await Switcher.walk(into: room, engine: engine)
+        let (display, others) = placeForWalk(into: room)
+        let report = await Switcher.walk(into: room, on: display, keeping: others, engine: engine)
         if let arranged = report.arranged, !room.windows.isEmpty {
             let placed = arranged.placed == 1 ? "1 window" : "\(arranged.placed) windows"
             let missing = Array(Set(arranged.missing)).sorted()
@@ -219,7 +237,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         paletteSnapshot = nil
         // The windows have moved under the preview; let it fade away.
         preview.hide(animated: true, delay: 0.05)
-        markCurrent(room)
+        markCurrent(room, on: display)
+    }
+
+    /// A room comes to the display you're on, and the rooms out on the other displays
+    /// stay there.
+    private func placeForWalk(into room: Room) -> (display: String, others: [Room]) {
+        let display = engine.activeScreenUUID()
+        let out = desk.others(than: display, connected: ScreenInfo.all().map(\.uuid))
+        return (display, rooms.filter { $0.id != room.id && out.values.contains($0.id) })
     }
 
     // MARK: Snapping
@@ -289,8 +315,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func screensChanged(_ note: Notification) { displaysChanged() }
 
-    /// A display came or went. Wait until macOS settles, then lay out the room you're
-    /// in for the biggest screen there is now.
+    /// A display came or went. Wait until macOS settles, then lay out the rooms that
+    /// are out again: each stays on its display if it's still there, and the room you're
+    /// in goes to the biggest screen when its own is gone (or it's the only room out).
     private func displaysChanged() {
         let screens = NSScreen.screens.map(\.frame)
         guard screens != lastScreens else { return }
@@ -299,12 +326,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         displayWork?.cancel()
         let work = DispatchWorkItem { [unowned self] in
             inTurn {
-                // Read the room now, in turn: a switch queued before this may have changed it.
-                guard AX.isTrusted, let room = self.rooms.first(where: { $0.id == self.currentRoomID }), !room.windows.isEmpty else { return }
-                let result = await self.engine.relayout(room)
-                guard result.placed > 0 else { return }
-                self.toast.show("\(room.name) · laid out for \(result.screen)",
-                           detail: added ? "A display was connected" : "A display was disconnected")
+                // Read the desk now, in turn: a switch queued before this may have changed it.
+                let screens = ScreenInfo.all()
+                guard !screens.isEmpty else { return }
+                var desk = self.desk
+                desk.settle(connected: screens.map(\.uuid), largest: screens[self.engine.largestScreenIndex(in: screens)].uuid)
+                self.desk = desk
+                self.updateStatusTitle()
+                guard AX.isTrusted else { return }
+                for (display, id) in desk.rooms {
+                    guard let room = self.rooms.first(where: { $0.id == id }), !room.windows.isEmpty else { continue }
+                    let result = await self.engine.relayout(room, on: display)
+                    guard room.id == desk.current, result.placed > 0 else { continue }
+                    self.toast.show("\(room.name) · laid out for \(result.screen)",
+                               detail: added ? "A display was connected" : "A display was disconnected")
+                }
             }
         }
         displayWork = work
@@ -358,8 +394,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return image
     }
 
-    private func markCurrent(_ room: Room) {
-        currentRoomID = room.id
+    private func markCurrent(_ room: Room, on display: String) {
+        var d = desk
+        d.enter(room.id, on: display)
+        desk = d
         var r = recency
         r[room.id] = Date()
         recency = r
@@ -440,8 +478,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let key = HotkeyCenter.shared.current?.label ?? "⌥ Space"
             // You walk into the room you just made: its windows come to this display
             // and lay out, and everything else steps back, as on any switch.
-            markCurrent(room)
-            _ = await Switcher.walk(into: room, engine: engine)
+            let (display, others) = placeForWalk(into: room)
+            markCurrent(room, on: display)
+            _ = await Switcher.walk(into: room, on: display, keeping: others, engine: engine)
             toast.show("Saved \(room.name) · \(count)",
                        detail: layoutPhrase(reading) + " · To change the layout: \(key), then Tab")
         } catch {
@@ -480,7 +519,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try RoomStore.save(all, to: RoomStore.defaultURL)
             rooms = all
             lastDeleted = (room, i)
-            if currentRoomID == room.id { currentRoomID = nil; updateStatusTitle() }
+            var d = desk
+            d.remove(room.id)
+            desk = d
+            updateStatusTitle()
             registerRoomKeys()
             Log.file("Deleted room \(room.name)")
             toast.show("Deleted “\(room.name)”", detail: "Its windows stay open. Undo: ⌘Z in \(HotkeyCenter.shared.current?.label ?? "⌥ Space"), or the menu bar menu.")
@@ -590,12 +632,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(detail)
         } else {
             let keys = Room.withShortcuts(rooms)
+            let out = Set(desk.rooms.values)
             for room in rooms {
                 let n = keys.first { $0.value.id == room.id }?.key
                 let entry = item(room.name, #selector(chooseRoom(_:)), key: n.map(String.init) ?? "")
                 entry.keyEquivalentModifierMask = [.control, .option]
                 entry.representedObject = room.id
-                entry.state = room.id == currentRoomID ? .on : .off
+                entry.state = room.id == currentRoomID || out.contains(room.id) ? .on : .off
                 menu.addItem(entry)
             }
         }
@@ -661,7 +704,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // In turn, so a switch queued before it can't mark its room current afterwards.
         inTurn { [unowned self] in
             engine.restoreEverything()
-            currentRoomID = nil
+            var d = desk
+            d.clear()
+            desk = d
             updateStatusTitle()
         }
     }

@@ -286,6 +286,11 @@ final class WindowEngine {
         return screens.isEmpty ? "" : screens[activeScreenIndex(in: screens)].uuid
     }
 
+    /// A display by UUID, if it's still connected.
+    func screenIndex(of uuid: String, in screens: [ScreenInfo]) -> Int? {
+        screens.firstIndex { $0.uuid == uuid }
+    }
+
     /// The display under the mouse, which is where the palette opens.
     private func activeScreenIndex(in screens: [ScreenInfo]) -> Int {
         let mouse = NSEvent.mouseLocation
@@ -310,13 +315,11 @@ final class WindowEngine {
         screens.indices.max { screens[$0].visible.width * screens[$0].visible.height < screens[$1].visible.width * screens[$1].visible.height } ?? 0
     }
 
-    /// Lays the current room out again, for example after a display was connected or
-    /// disconnected (on the largest display), or right after saving it (`onLargest`
-    /// false: the display you're on). Only the room's own windows move; nothing is
-    /// hidden or parked.
-    func relayout(_ room: Room, onLargest: Bool = true) async -> (placed: Int, screen: String) {
+    /// Lays a room out again on `display`, for example after a display was connected
+    /// or disconnected. Only the room's own windows move; nothing is hidden or parked.
+    func relayout(_ room: Room, on display: String) async -> (placed: Int, screen: String) {
         var snap = snapshot()
-        let pick = { (s: Snapshot) in onLargest ? self.largestScreenIndex(in: s.screens) : self.activeScreenIndex(in: s.screens) }
+        let pick = { (s: Snapshot) in self.screenIndex(of: display, in: s.screens) }
         var placements = plan(room, in: snap, on: pick(snap)).placements
         for p in placements { move(p.window, to: p.rect) }
         for _ in 0..<3 {
@@ -327,19 +330,21 @@ final class WindowEngine {
             for p in placements { move(p.window, to: p.rect) }
         }
         await stackFrontToBack(placements)
-        let name = NSScreen.screens.count > 1 && onLargest ? "the larger display" : "this display"
+        let name = snap.screens.count > 1 && pick(snap) == largestScreenIndex(in: snap.screens) ? "the larger display" : "this display"
         Log.file("Re-laid out \(room.name) for \(name) (\(snap.screens.count) displays): \(placements.count) windows")
         return (placements.count, name)
     }
 
     // MARK: Walk into a room
 
-    /// `launched`: apps just opened for this room; their windows can take a few
-    /// seconds to appear, so wait for them before laying out.
-    func arrange(_ room: Room, launched: Set<String> = []) async -> Report {
+    /// The room comes to `display`. `others`: rooms out on other displays, whose windows
+    /// there are left as they are. `launched`: apps just opened for this room; their
+    /// windows can take a few seconds to appear, so wait for them before laying out.
+    func arrange(_ room: Room, on display: String, keeping others: [Room] = [], launched: Set<String> = []) async -> Report {
         let start = Date()
         var report = Report()
         let roomBundles = Set(room.windows.map(\.bundleID)).union(room.apps.map(\.bundleID))
+        let here = { (s: Snapshot) in self.screenIndex(of: display, in: s.screens) }
 
         // 1. Bring the room's apps forward, and wait until they really are: a hidden
         //    app ignores (or half-applies) moves sent while it is still unhiding.
@@ -348,13 +353,13 @@ final class WindowEngine {
         for _ in 0..<30 where hidden.contains(where: \.isHidden) { try? await Task.sleep(for: .milliseconds(20)) }
 
         var snap = snapshot()
-        var (placements, missing) = plan(room, in: snap)
+        var (placements, missing) = plan(room, in: snap, on: here(snap))
         // Just-unhidden apps can take a moment to report their windows again.
         let waitingForLaunch = { missing.contains { launched.contains($0.bundleID) } }
         for _ in 0..<(launched.isEmpty ? 5 : 40) where !missing.isEmpty && (!hidden.isEmpty || waitingForLaunch()) {
             try? await Task.sleep(for: .milliseconds(launched.isEmpty ? 80 : 100))
             snap = snapshot()
-            (placements, missing) = plan(room, in: snap)
+            (placements, missing) = plan(room, in: snap, on: here(snap))
         }
         Log.file("Walk into \(room.name): \(snap.windows.count) windows on the desk, \(placements.count) of \(room.windows.count) room windows found; unhid [\(hidden.compactMap(\.localizedName).joined(separator: ", "))]")
         report.missing = missing.map { $0.app ?? $0.bundleID }
@@ -374,7 +379,7 @@ final class WindowEngine {
             try? await Task.sleep(for: .milliseconds(120))
             guard await learnMinimums(from: placements) else { break }
             snap = snapshot()
-            placements = plan(room, in: snap).placements
+            placements = plan(room, in: snap, on: here(snap)).placements
             for p in placements { move(p.window, to: p.rect) }
             Log.file("  re-laid out around minimum sizes: " + placements.map { "\($0.window.app.localizedName ?? "") \(Int($0.rect.width))×\(Int($0.rect.height))" }.joined(separator: ", "))
         }
@@ -385,11 +390,15 @@ final class WindowEngine {
         let isChosen = { (w: LiveWindow) in
             w.windowID.map(chosenIDs.contains) ?? chosenElements.contains { CFEqual($0, w.element) }
         }
-        let appsWithRoomWindows = Set(placements.map(\.window.bundleID))
+        // The rooms out on other displays keep their windows there, and their apps.
+        let kept = windowsKept(for: others, in: snap, besides: isChosen, awayFrom: here(snap))
+        let isKept = { (w: LiveWindow) in kept.contains { a in a.windowID.map { $0 == w.windowID } ?? CFEqual(a.element, w.element) } }
+        let keptBundles = Set(kept.map(\.bundleID))
+        let appsWithRoomWindows = Set(placements.map(\.window.bundleID)).union(keptBundles)
 
         // 3. Rest everything else. Apps with nothing in the room are hidden whole
         //    (native, instant); other windows of room apps are parked off-screen.
-        for win in windows where !isChosen(win) {
+        for win in windows where !isChosen(win) && !isKept(win) {
             if appsWithRoomWindows.contains(win.bundleID) || parkInstead.contains(win.bundleID) {
                 if !win.isMinimized, park(win, screens: screens) { report.parked += 1 }
             } else {
@@ -414,7 +423,7 @@ final class WindowEngine {
         //    refused; Accessibility's own "hidden" attribute is the reliable fallback.
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular
             && app != .current && !app.isHidden && !roomBundles.contains(app.bundleIdentifier ?? "")
-            && !parkInstead.contains(app.bundleIdentifier ?? "") {
+            && !keptBundles.contains(app.bundleIdentifier ?? "") && !parkInstead.contains(app.bundleIdentifier ?? "") {
             var how = "ok"
             if !app.hide() {
                 AX.setBool(AX.app(app.processIdentifier), kAXHiddenAttribute, true)
@@ -451,12 +460,29 @@ final class WindowEngine {
         }
         if cameBack { saveLedger() }
         report.milliseconds = Int(Date().timeIntervalSince(start) * 1000)
-        Log.file("Arranged \(room.name) (\(room.layout.rawValue)): \(report.placed) placed, \(report.parked) parked, \(report.hiddenApps) apps hidden, re-applied [\(off.joined(separator: ", "))], missing [\(report.missing.joined(separator: ", "))] in \(report.milliseconds) ms")
+        Log.file("Arranged \(room.name) (\(room.layout.rawValue)): \(report.placed) placed, \(kept.count) kept for [\(others.map(\.name).joined(separator: ", "))], \(report.parked) parked, \(report.hiddenApps) apps hidden, re-applied [\(off.joined(separator: ", "))], missing [\(report.missing.joined(separator: ", "))] in \(report.milliseconds) ms")
         for p in placements {
             let a = AX.frame(p.window.element) ?? .zero
             Log.file("  \(p.window.app.localizedName ?? ""): wanted \(Int(p.rect.width))×\(Int(p.rect.height)) @\(Int(p.rect.minX)),\(Int(p.rect.minY))  got \(Int(a.width))×\(Int(a.height)) @\(Int(a.minX)),\(Int(a.minY))")
         }
         return report
+    }
+
+    /// The windows of rooms out on other displays: matched among the windows this room
+    /// didn't take, and only those still away from the display it's coming to.
+    private func windowsKept(for others: [Room], in snap: Snapshot, besides isChosen: (LiveWindow) -> Bool, awayFrom here: Int?) -> [LiveWindow] {
+        var free = snap.windows.filter { !isChosen($0) }
+        var kept: [LiveWindow] = []
+        for other in others {
+            let assignment = assign(other, to: free)
+            let taken = Set(assignment.values)
+            kept += taken.map { free[$0] }.filter { w in
+                !w.isMinimized && !w.app.isHidden && !(w.windowID.map { ledger.entries[$0] != nil } ?? false)
+                    && Geometry.bestScreen(for: w.frame, among: snap.screens.map(\.frame)).map { $0 != here } ?? false
+            }
+            free = free.indices.filter { !taken.contains($0) }.map { free[$0] }
+        }
+        return kept
     }
 
     // MARK: Minimum sizes

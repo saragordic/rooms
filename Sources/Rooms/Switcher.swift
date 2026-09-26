@@ -14,7 +14,8 @@ enum Switcher {
         var rested = 0
     }
 
-    static func walk(into room: Room, engine: WindowEngine) async -> Report {
+    /// The room comes to `display`; `others`, the rooms out on other displays, stay.
+    static func walk(into room: Room, on display: String, keeping others: [Room] = [], engine: WindowEngine) async -> Report {
         var report = Report()
         let ws = NSWorkspace.shared
 
@@ -36,9 +37,9 @@ enum Switcher {
 
         // 2. Arrange.
         if AX.isTrusted {
-            report.arranged = await engine.arrange(room, launched: launchedIDs)
+            report.arranged = await engine.arrange(room, on: display, keeping: others, launched: launchedIDs)
         } else {
-            let wanted = Set(bundles)
+            let wanted = Set(bundles + others.flatMap { $0.windows.map(\.bundleID) + $0.apps.map(\.bundleID) })
             for app in ws.runningApplications where app.activationPolicy == .regular && app != .current {
                 if wanted.contains(app.bundleIdentifier ?? "") { app.unhide() } else if !app.isHidden, app.hide() { report.rested += 1 }
             }
