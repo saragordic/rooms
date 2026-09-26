@@ -124,7 +124,13 @@ final class WindowEngine {
         }
         let ordered = keepOrder ? wins : reading.order.map { wins[$0] }
         var updated = room
-        let kept = room.windows.filter { slot in !wins.contains { $0.windowID != nil && $0.windowID == slot.windowID } && !keepOrder }
+        // Match by the same title/window-ID rules used everywhere else. Comparing only
+        // live window IDs would mistake a relaunched window for a closed one, while a
+        // genuinely closed slot remains here with its saved My Layout cell intact.
+        let matchedSlots = Set(assign(room, to: wins).keys)
+        let kept = keepOrder ? [] : room.windows.enumerated().compactMap { index, slot in
+            matchedSlots.contains(index) ? nil : slot
+        }
         var learned = slots(for: ordered)
         if reading.kind == .mine, let cells = reading.cells, cells.count == learned.count {
             for i in learned.indices { learned[i].cell = cells[i] }   // `order` is unchanged for .mine
@@ -189,21 +195,36 @@ final class WindowEngine {
         let window: LiveWindow
     }
 
+    private struct LayoutFrames {
+        let rects: [CGRect]
+        let effective: LayoutKind
+        let fallbackReason: String?
+    }
+
+    struct Plan {
+        let placements: [Placement]
+        let missing: [WindowSlot]
+        let effectiveLayout: LayoutKind
+        let layoutFallbackReason: String?
+    }
+
     func snapshot() -> Snapshot { Snapshot(screens: ScreenInfo.all(), windows: inventory()) }
 
     /// Matches the room's windows to open ones and lays out those that are open.
     /// A room comes to you: all of its windows, on one display (the one you're working
     /// on, unless `preferredScreen` says otherwise), wherever they were before.
-    func plan(_ room: Room, in snap: Snapshot, on preferredScreen: Int? = nil) -> (placements: [Placement], missing: [WindowSlot]) {
+    func plan(_ room: Room, in snap: Snapshot, on preferredScreen: Int? = nil) -> Plan {
         let assignment = assign(room, to: snap.windows)
-        guard !snap.screens.isEmpty else { return ([], room.windows) }
+        guard !snap.screens.isEmpty else { return Plan(placements: [], missing: room.windows, effectiveLayout: .auto, layoutFallbackReason: "no display is available") }
         let here = min(preferredScreen ?? activeScreenIndex(in: snap.screens), snap.screens.count - 1)
         let found = room.windows.indices.filter { assignment[$0] != nil }
         var rects: [Int: CGRect] = [:]
+        var layout = LayoutFrames(rects: [], effective: room.layout(on: snap.screens[here].uuid), fallbackReason: nil)
         if !found.isEmpty {
             let visible = snap.screens[here].visible
             let mins = found.map { minimumSize(for: room.windows[$0].bundleID) }
-            for (k, r) in frames(for: room, slots: found, kind: room.layout(on: snap.screens[here].uuid), in: visible, mins: mins).enumerated() {
+            layout = frames(for: room, slots: found, kind: room.layout(on: snap.screens[here].uuid), in: visible, mins: mins)
+            for (k, r) in layout.rects.enumerated() {
                 rects[found[k]] = r
             }
         }
@@ -212,32 +233,48 @@ final class WindowEngine {
             return Placement(slot: room.windows[i], rect: rect, window: snap.windows[w])
         }
         let missing = room.windows.indices.filter { assignment[$0] == nil }.map { room.windows[$0] }
-        return (placements, missing)
+        return Plan(placements: placements, missing: missing, effectiveLayout: layout.effective, layoutFallbackReason: layout.fallbackReason)
     }
 
     /// Where a room's open windows go with `kind`. A layout chosen on another screen,
     /// or before an app's minimum size was known, is checked here every time: if it
     /// no longer fits cleanly, Auto lays the room out instead of pushing windows off
     /// screen or on top of each other.
-    private func frames(for room: Room, slots: [Int], kind: LayoutKind, in visible: CGRect, mins: [CGSize]) -> [CGRect] {
+    private func frames(for room: Room, slots: [Int], kind: LayoutKind, in visible: CGRect, mins: [CGSize]) -> LayoutFrames {
         let n = slots.count
-        let auto = { Tiler.frames(count: n, kind: .auto, in: visible, mins: mins) }
+        let auto = { LayoutFrames(rects: Tiler.frames(count: n, kind: .auto, in: visible, mins: mins), effective: .auto, fallbackReason: nil) }
+        let fallback = { (reason: String) in
+            LayoutFrames(rects: Tiler.frames(count: n, kind: .auto, in: visible, mins: mins), effective: .auto, fallbackReason: reason)
+        }
         switch kind {
         case .saved:
             // Exactly where they were saved, but always on this screen.
             let rects = slots.map { Tiler.clamp(Geometry.keptOnScreen(Geometry.resolve(room.windows[$0].frame, in: visible), screens: [visible]), into: visible) }
-            return rects.allSatisfy(visible.contains) ? rects : auto()
+            return rects.allSatisfy(visible.contains)
+                ? LayoutFrames(rects: rects, effective: .saved, fallbackReason: nil)
+                : fallback("saved frames do not fit this display")
         case .mine:
             // Your own combination, drawn on the grid with even gaps on any screen,
             // widening the columns of apps that refuse to shrink (Figma, Outlook…).
-            let cells = slots.compactMap { room.windows[$0].cell }
-            guard cells.count == n, n == room.windows.count else { return auto() }
-            let rects = GridLayout.frames(cells, in: visible, mins: mins)
-            return Tiler.isClean(rects, in: visible.insetBy(dx: Tiler.gap - 1, dy: Tiler.gap - 1)) ? rects : auto()
+            // Closed windows leave their saved cells alone, so the ones that are open
+            // stay in their own places. An open window with no cell has no safe place
+            // in the layout, so Auto takes over for all open windows.
+            let cells = slots.map { room.windows[$0].cell }
+            guard cells.allSatisfy({ $0 != nil }) else {
+                return fallback("an open window has no saved My Layout cell")
+            }
+            guard let rects = MineLayout.frames(cells: cells, in: visible, mins: mins) else {
+                return fallback("saved My Layout cells do not fit cleanly")
+            }
+            return LayoutFrames(rects: rects, effective: .mine, fallbackReason: nil)
         case .focus, .columns, .grid:
-            return Tiler.fits(count: n, kind: kind, in: visible, mins: mins) ? Tiler.frames(count: n, kind: kind, in: visible, mins: mins) : auto()
+            return Tiler.fits(count: n, kind: kind, in: visible, mins: mins)
+                ? LayoutFrames(rects: Tiler.frames(count: n, kind: kind, in: visible, mins: mins), effective: kind, fallbackReason: nil)
+                : fallback("\(kind.rawValue) does not fit cleanly")
         case .auto, .stack:
-            return Tiler.frames(count: n, kind: kind, in: visible, mins: mins)
+            return kind == .auto
+                ? auto()
+                : LayoutFrames(rects: Tiler.frames(count: n, kind: kind, in: visible, mins: mins), effective: .stack, fallbackReason: nil)
         }
     }
 
@@ -250,17 +287,21 @@ final class WindowEngine {
         let present = room.windows.indices.filter { assignment[$0] != nil }
         let n = present.count
         let current = room.layout(on: screen.uuid)
-        guard n > 1 else { return current == .auto ? [.auto] : [.auto, current] }
         let mins = present.map { minimumSize(for: room.windows[$0].bundleID) }
+        if n <= 1 {
+            guard current != .auto else { return [.auto] }
+            return frames(for: room, slots: present, kind: current, in: screen.visible, mins: mins).effective == current
+                ? [.auto, current] : [.auto]
+        }
         var seen: [[CGRect]] = []
         var choices: [LayoutKind] = []
         for kind in LayoutKind.allCases {
             switch kind {
             case .mine:
                 // Offered only where it draws cleanly (see `frames(for:)`).
-                if n == room.windows.count, present.allSatisfy({ room.windows[$0].cell != nil }),
-                   frames(for: room, slots: present, kind: .mine, in: screen.visible, mins: mins)
-                       != Tiler.frames(count: n, kind: .auto, in: screen.visible, mins: mins) {
+                let layout = frames(for: room, slots: present, kind: .mine, in: screen.visible, mins: mins)
+                if layout.effective == .mine,
+                   layout.rects != Tiler.frames(count: n, kind: .auto, in: screen.visible, mins: mins) {
                     choices.append(kind)
                 }
             case .saved:
@@ -317,13 +358,15 @@ final class WindowEngine {
     func relayout(_ room: Room, onLargest: Bool = true) async -> (placed: Int, screen: String) {
         var snap = snapshot()
         let pick = { (s: Snapshot) in onLargest ? self.largestScreenIndex(in: s.screens) : self.activeScreenIndex(in: s.screens) }
-        var placements = plan(room, in: snap, on: pick(snap)).placements
+        var planned = plan(room, in: snap, on: pick(snap))
+        var placements = planned.placements
         for p in placements { move(p.window, to: p.rect) }
         for _ in 0..<3 {
             try? await Task.sleep(for: .milliseconds(120))
             guard await learnMinimums(from: placements) else { break }
             snap = snapshot()
-            placements = plan(room, in: snap, on: pick(snap)).placements
+            planned = plan(room, in: snap, on: pick(snap))
+            placements = planned.placements
             for p in placements { move(p.window, to: p.rect) }
         }
         await stackFrontToBack(placements)
@@ -348,13 +391,17 @@ final class WindowEngine {
         for _ in 0..<30 where hidden.contains(where: \.isHidden) { try? await Task.sleep(for: .milliseconds(20)) }
 
         var snap = snapshot()
-        var (placements, missing) = plan(room, in: snap)
+        var planned = plan(room, in: snap)
+        var placements = planned.placements
+        var missing = planned.missing
         // Just-unhidden apps can take a moment to report their windows again.
         let waitingForLaunch = { missing.contains { launched.contains($0.bundleID) } }
         for _ in 0..<(launched.isEmpty ? 5 : 40) where !missing.isEmpty && (!hidden.isEmpty || waitingForLaunch()) {
             try? await Task.sleep(for: .milliseconds(launched.isEmpty ? 80 : 100))
             snap = snapshot()
-            (placements, missing) = plan(room, in: snap)
+            planned = plan(room, in: snap)
+            placements = planned.placements
+            missing = planned.missing
         }
         Log.file("Walk into \(room.name): \(snap.windows.count) windows on the desk, \(placements.count) of \(room.windows.count) room windows found; unhid [\(hidden.compactMap(\.localizedName).joined(separator: ", "))]")
         report.missing = missing.map { $0.app ?? $0.bundleID }
@@ -374,7 +421,8 @@ final class WindowEngine {
             try? await Task.sleep(for: .milliseconds(120))
             guard await learnMinimums(from: placements) else { break }
             snap = snapshot()
-            placements = plan(room, in: snap).placements
+            planned = plan(room, in: snap)
+            placements = planned.placements
             for p in placements { move(p.window, to: p.rect) }
             Log.file("  re-laid out around minimum sizes: " + placements.map { "\($0.window.app.localizedName ?? "") \(Int($0.rect.width))×\(Int($0.rect.height))" }.joined(separator: ", "))
         }
@@ -451,7 +499,8 @@ final class WindowEngine {
         }
         if cameBack { saveLedger() }
         report.milliseconds = Int(Date().timeIntervalSince(start) * 1000)
-        Log.file("Arranged \(room.name) (\(room.layout.rawValue)): \(report.placed) placed, \(report.parked) parked, \(report.hiddenApps) apps hidden, re-applied [\(off.joined(separator: ", "))], missing [\(report.missing.joined(separator: ", "))] in \(report.milliseconds) ms")
+        let fallback = planned.layoutFallbackReason.map { "; fallback: \($0)" } ?? ""
+        Log.file("Arranged \(room.name) (\(planned.effectiveLayout.rawValue)): \(report.placed) placed, \(report.parked) parked, \(report.hiddenApps) apps hidden, re-applied [\(off.joined(separator: ", "))], missing [\(report.missing.joined(separator: ", "))]\(fallback) in \(report.milliseconds) ms")
         for p in placements {
             let a = AX.frame(p.window.element) ?? .zero
             Log.file("  \(p.window.app.localizedName ?? ""): wanted \(Int(p.rect.width))×\(Int(p.rect.height)) @\(Int(p.rect.minX)),\(Int(p.rect.minY))  got \(Int(a.width))×\(Int(a.height)) @\(Int(a.minX)),\(Int(a.minY))")

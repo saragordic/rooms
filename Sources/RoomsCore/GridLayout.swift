@@ -65,7 +65,7 @@ public enum GridLayout {
         return cells
     }
 
-    private static func valid(_ cells: [GridCell]) -> Bool {
+    static func valid(_ cells: [GridCell]) -> Bool {
         cells.allSatisfy { c in
             (0..<units).contains(c.col) && (0..<units).contains(c.row)
                 && c.cols > 0 && c.cols <= units - c.col
@@ -76,13 +76,13 @@ public enum GridLayout {
     /// Draws cells with exactly one `gap` between neighbours and around the edge.
     /// `mins`: each window's smallest size. Columns and rows holding a window that
     /// won't shrink are widened, and the others give up the space, so nothing overlaps.
-    public static func frames(_ cells: [GridCell], in area: CGRect, gap: CGFloat = Tiler.gap, mins: [CGSize] = []) -> [CGRect] {
+    public static func frames(_ cells: [GridCell], in area: CGRect, gap: CGFloat = Tiler.gap, mins: [CGSize] = [], fillHoles: Bool = true) -> [CGRect] {
         guard valid(cells) else {
             return Tiler.frames(count: cells.count, kind: .auto, in: area, gap: gap, mins: mins)
         }
         let a = area.insetBy(dx: gap, dy: gap)
         let mins = mins.count == cells.count ? mins : Array(repeating: .zero, count: cells.count)
-        let cells = fillingHoles(cells)   // rooms saved before holes were filled
+        let cells = fillHoles ? fillingHoles(cells) : cells
 
         // What each column and row must be at least, spreading a window's minimum
         // across the columns (or rows) it spans.
@@ -104,5 +104,20 @@ public enum GridLayout {
             // Round edges, not sizes, so gaps stay exact.
             return CGRect(x: x0.rounded(), y: y0.rounded(), width: x1.rounded() - x0.rounded(), height: y1.rounded() - y0.rounded())
         }
+    }
+}
+
+/// Draws the cells saved for My Layout. A subset keeps its own cells exactly: a
+/// closed window leaves a hole instead of causing an open neighbour to grow into it.
+public enum MineLayout {
+    /// Nil means an open window has no saved cell, or the saved cells cannot be
+    /// placed safely. The caller can then use Auto for every open window.
+    public static func frames(cells: [GridCell?], in area: CGRect, mins: [CGSize] = []) -> [CGRect]? {
+        guard !cells.contains(where: { $0 == nil }) else { return nil }
+        let saved = cells.compactMap { $0 }
+        guard GridLayout.valid(saved) else { return nil }
+        let rects = GridLayout.frames(saved, in: area, mins: mins, fillHoles: false)
+        let safeArea = area.insetBy(dx: Tiler.gap - 1, dy: Tiler.gap - 1)
+        return Tiler.isClean(rects, in: safeArea) ? rects : nil
     }
 }

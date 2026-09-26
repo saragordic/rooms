@@ -65,6 +65,14 @@ private let frame = FractionalFrame(x: 0, y: 0, w: 1, h: 1)
     #expect(SlotMatcher.assign(slots: slots, windows: wins) == [0: 1, 1: 0])
 }
 
+@Test func aClosedSlotStaysUnmatchedWhenAnotherWindowRelaunches() {
+    let slots = [WindowSlot(bundleID: "ghostty", title: "Project terminal", windowID: 1, frame: frame),
+                 WindowSlot(bundleID: "ghostty", title: "Build terminal", windowID: 2, frame: frame)]
+    // The first terminal relaunched (new window ID); the second is genuinely closed.
+    let wins = [WindowInfo(bundleID: "ghostty", title: "Project terminal", windowID: 90)]
+    #expect(SlotMatcher.assign(slots: slots, windows: wins) == [0: 0])
+}
+
 @Test func neverUsesAWindowTwice() {
     let slots = [WindowSlot(bundleID: "chrome", title: "A", frame: frame),
                  WindowSlot(bundleID: "chrome", title: "B", frame: frame),
