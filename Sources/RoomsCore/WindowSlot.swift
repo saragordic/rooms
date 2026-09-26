@@ -26,6 +26,30 @@ public struct WindowSlot: Codable, Hashable, Sendable {
     }
 }
 
+/// A window kept in the same relative place whenever it appears in a room.
+/// Window IDs identify an open window exactly; its title lets the pin survive a
+/// relaunch, provided the new window still has the same title.
+public struct WindowPin: Codable, Hashable, Sendable {
+    public var bundleID: String
+    public var title: String
+    public var windowID: UInt32?
+    public var frame: FractionalFrame
+
+    public init(bundleID: String, title: String, windowID: UInt32?, frame: FractionalFrame) {
+        self.bundleID = bundleID
+        self.title = title
+        self.windowID = windowID
+        self.frame = frame
+    }
+
+    public func matches(_ window: WindowInfo) -> Bool {
+        guard bundleID == window.bundleID else { return false }
+        if let windowID, window.windowID == windowID { return true }
+        if title.isEmpty { return true }
+        return !title.isEmpty && title == window.title
+    }
+}
+
 /// A live window, reduced to what matching needs.
 public struct WindowInfo: Sendable, Equatable {
     public var bundleID: String

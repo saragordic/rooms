@@ -73,6 +73,49 @@ private func inside(_ frames: [CGRect]) -> Bool {
     #expect(file.rooms[0].layout == .auto)
 }
 
+@Test func pinnedWindowReservesItsRectangle() {
+    let pinned = CGRect(x: area.maxX - area.width / 2, y: area.maxY - area.height / 2, width: area.width / 2, height: area.height / 2)
+    let rest = PinnedLayout.frames(count: 3, around: pinned, in: area)!
+    #expect(rest.count == 3)
+    #expect(rest.allSatisfy { area.contains($0) && $0.intersection(pinned).isNull })
+}
+
+@Test func aPinnedLeftColumnKeepsDonsFourWindowMyLayout() {
+    let cells = [
+        GridCell(col: 0, cols: 2, row: 0, rows: 12),  // pinned sidebar, left column
+        GridCell(col: 2, cols: 6, row: 0, rows: 12),  // chat, centre
+        GridCell(col: 8, cols: 4, row: 0, rows: 6),   // editor, top-right
+        GridCell(col: 8, cols: 4, row: 6, rows: 6),   // browser, bottom-right
+    ]
+    let saved = MineLayout.frames(cells: cells.map(Optional.some), in: area)!
+    let pin = saved[0]
+    let kept = PinnedLayout.keepingMyLayout(saved, pinAt: 0, pin: pin, in: area)
+    #expect(kept == saved)
+}
+
+@Test func aPinThatRunsIntoMyLayoutStillFallsBack() {
+    let cells = [
+        GridCell(col: 0, cols: 2, row: 0, rows: 12),
+        GridCell(col: 2, cols: 6, row: 0, rows: 12),
+        GridCell(col: 8, cols: 4, row: 0, rows: 6),
+        GridCell(col: 8, cols: 4, row: 6, rows: 6),
+    ]
+    let saved = MineLayout.frames(cells: cells.map(Optional.some), in: area)!
+    let conflicting = CGRect(x: saved[0].minX, y: saved[0].minY,
+                             width: saved[1].minX - saved[0].minX + g, height: saved[0].height)
+    #expect(PinnedLayout.keepingMyLayout(saved, pinAt: 0, pin: conflicting, in: area) == nil)
+}
+
+@Test func aFullScreenPinHasNoRoomForAnotherWindow() {
+    #expect(PinnedLayout.frames(count: 1, around: area, in: area) == nil)
+}
+
+@Test func pinnedLayoutUsesTheRequestedLayoutInTheLargestFreeRegion() {
+    let pinned = CGRect(x: area.maxX - area.width / 2, y: area.maxY - area.height / 2, width: area.width / 2, height: area.height / 2)
+    let free = PinnedLayout.largestFreeRegion(around: pinned, in: area)!
+    #expect(PinnedLayout.frames(count: 2, kind: .columns, around: pinned, in: area) == Tiler.frames(count: 2, kind: .columns, in: free))
+}
+
 // MARK: Minimum sizes (Figma won't go below 900×600, Outlook 1142×684…)
 
 @Test func distributeKeepsMinimums() {
