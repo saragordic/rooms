@@ -100,6 +100,26 @@ private func roomByHand(_ a: CGRect) -> [CGRect] {
     #expect(GridLayout.frames(cells, in: region) == GridLayout.frames(cells, in: region, mins: [.zero, .zero]))
 }
 
+@Test func partialMyLayoutKeepsTheOpenWindowsInTheirSavedCells() {
+    let cells = Arrangement.read(roomByHand(area), in: area).cells!
+    let allFrames = GridLayout.frames(cells, in: area, fillHoles: false)
+    // The second and fourth windows are closed. The open windows must retain their
+    // positions rather than expanding into those holes.
+    let open = [cells[0], cells[2], cells[4]].map(Optional.some)
+    let partial = MineLayout.frames(cells: open, in: area)
+    #expect(partial == [allFrames[0], allFrames[2], allFrames[4]])
+}
+
+@Test func myLayoutWithAnOpenWindowThatHasNoCellFallsBack() {
+    let cells = [GridCell(col: 0, cols: 6, row: 0, rows: 12), nil]
+    #expect(MineLayout.frames(cells: cells, in: area) == nil)
+}
+
+@Test func malformedOrOverlappingMyLayoutFallsBack() {
+    let overlapping = [GridCell(col: 0, cols: 8, row: 0, rows: 12), GridCell(col: 4, cols: 8, row: 0, rows: 12)]
+    #expect(MineLayout.frames(cells: overlapping.map(Optional.some), in: area) == nil)
+}
+
 // MARK: No holes in My Layout
 
 @Test func aGapBetweenWindowsIsFilled() {

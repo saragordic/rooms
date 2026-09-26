@@ -65,6 +65,25 @@ private let frame = FractionalFrame(x: 0, y: 0, w: 1, h: 1)
     #expect(SlotMatcher.assign(slots: slots, windows: wins) == [0: 1, 1: 0])
 }
 
+@Test func aClosedSlotStaysUnmatchedWhenAnotherWindowRelaunches() {
+    let slots = [WindowSlot(bundleID: "ghostty", title: "Project terminal", windowID: 1, frame: frame),
+                 WindowSlot(bundleID: "ghostty", title: "Build terminal", windowID: 2, frame: frame)]
+    // The first terminal relaunched (new window ID); the second is genuinely closed.
+    let wins = [WindowInfo(bundleID: "ghostty", title: "Project terminal", windowID: 90)]
+    #expect(SlotMatcher.assign(slots: slots, windows: wins) == [0: 0])
+}
+
+@Test func aPinMatchesTheSameWindowAfterItRelaunches() {
+    let pin = WindowPin(bundleID: "ghostty", title: "Project terminal", windowID: 1, frame: frame)
+    #expect(pin.matches(WindowInfo(bundleID: "ghostty", title: "Project terminal", windowID: 90)))
+    #expect(!pin.matches(WindowInfo(bundleID: "ghostty", title: "Other terminal", windowID: 90)))
+}
+
+@Test func anEmptyTitlePinMatchesTheAppAfterRelaunch() {
+    let pin = WindowPin(bundleID: "com.aside.Aside", title: "", windowID: 1, frame: frame)
+    #expect(pin.matches(WindowInfo(bundleID: "com.aside.Aside", title: "", windowID: 90)))
+}
+
 @Test func neverUsesAWindowTwice() {
     let slots = [WindowSlot(bundleID: "chrome", title: "A", frame: frame),
                  WindowSlot(bundleID: "chrome", title: "B", frame: frame),
