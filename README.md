@@ -8,6 +8,10 @@ nothing is ever closed.
 
 ![The Rooms switcher over a tidy desk, listing four rooms: Design, Build, Deep Work and Morning](docs/hero.jpg)
 
+https://github.com/user-attachments/assets/9b9c2103-22de-4aed-b69a-d6d1c2c324e5
+
+
+
 ## Get it
 
 You can just send this repo to your coding agent and ask it to install Rooms for you:
