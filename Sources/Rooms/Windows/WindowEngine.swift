@@ -33,6 +33,8 @@ final class WindowEngine {
     /// Windows that belong to rooms other than this one (set by the app), so a room
     /// missing its browser window takes a free one before another project's.
     var claimedWindows: (Room) -> Set<UInt32> = { _ in [] }
+    /// Globally pinned windows, supplied by the app's local preferences.
+    var pins: () -> [WindowPin] = { [] }
 
     private func assign(_ room: Room, to windows: [LiveWindow]) -> [Int: Int] {
         SlotMatcher.assign(slots: room.windows, windows: windows.map(\.info), claimed: claimedWindows(room))
@@ -101,6 +103,13 @@ final class WindowEngine {
                 frame: Geometry.fraction(of: win.frame, in: screens[i].visible)
             )
         }
+    }
+
+    func pin(for window: LiveWindow) -> WindowPin? {
+        let screens = ScreenInfo.all()
+        guard let index = Geometry.bestScreen(for: window.frame, among: screens.map(\.frame)) else { return nil }
+        return WindowPin(bundleID: window.bundleID, title: window.title, windowID: window.windowID,
+                         frame: Geometry.fraction(of: window.frame, in: screens[index].visible))
     }
 
     /// Learns the arrangement you made: which layout it's closest to (or your own, kept
@@ -206,6 +215,8 @@ final class WindowEngine {
         let missing: [WindowSlot]
         let effectiveLayout: LayoutKind
         let layoutFallbackReason: String?
+        let pin: WindowPin?
+        let ignoredPins: Int
     }
 
     func snapshot() -> Snapshot { Snapshot(screens: ScreenInfo.all(), windows: inventory()) }
@@ -215,17 +226,53 @@ final class WindowEngine {
     /// on, unless `preferredScreen` says otherwise), wherever they were before.
     func plan(_ room: Room, in snap: Snapshot, on preferredScreen: Int? = nil) -> Plan {
         let assignment = assign(room, to: snap.windows)
-        guard !snap.screens.isEmpty else { return Plan(placements: [], missing: room.windows, effectiveLayout: .auto, layoutFallbackReason: "no display is available") }
+        guard !snap.screens.isEmpty else { return Plan(placements: [], missing: room.windows, effectiveLayout: .auto, layoutFallbackReason: "no display is available", pin: nil, ignoredPins: 0) }
         let here = min(preferredScreen ?? activeScreenIndex(in: snap.screens), snap.screens.count - 1)
         let found = room.windows.indices.filter { assignment[$0] != nil }
         var rects: [Int: CGRect] = [:]
         var layout = LayoutFrames(rects: [], effective: room.layout(on: snap.screens[here].uuid), fallbackReason: nil)
+        var appliedPin: WindowPin?
+        var ignoredPins = 0
         if !found.isEmpty {
             let visible = snap.screens[here].visible
-            let mins = found.map { minimumSize(for: room.windows[$0].bundleID) }
-            layout = frames(for: room, slots: found, kind: room.layout(on: snap.screens[here].uuid), in: visible, mins: mins)
-            for (k, r) in layout.rects.enumerated() {
-                rects[found[k]] = r
+            let matchingPins = found.compactMap({ slot -> (Int, WindowPin)? in
+                guard let live = assignment[slot], let pin = pins().first(where: { $0.matches(snap.windows[live].info) }) else { return nil }
+                return (slot, pin)
+            })
+            if let pinned = matchingPins.first {
+                ignoredPins = max(0, matchingPins.count - 1)
+                let pinFrame = Tiler.clamp(Geometry.resolve(pinned.1.frame, in: visible), into: visible)
+                let requested = room.layout(on: snap.screens[here].uuid)
+                if requested == .mine,
+                   let pinnedIndex = found.firstIndex(of: pinned.0) {
+                    let mineMins = found.map { minimumSize(for: room.windows[$0].bundleID) }
+                    let mine = frames(for: room, slots: found, kind: .mine, in: visible, mins: mineMins)
+                    if mine.effective == .mine,
+                       let mineRects = PinnedLayout.keepingMyLayout(mine.rects, pinAt: pinnedIndex, pin: pinFrame, in: visible) {
+                        for (slot, frame) in zip(found, mineRects) { rects[slot] = frame }
+                        layout = LayoutFrames(rects: [], effective: .mine, fallbackReason: nil)
+                        appliedPin = pinned.1
+                    }
+                }
+                if rects.isEmpty {
+                    let others = found.filter { $0 != pinned.0 }
+                    let mins = others.map { minimumSize(for: room.windows[$0].bundleID) }
+                    let kind: LayoutKind = [.mine, .saved].contains(requested) ? .auto : requested
+                    if let otherFrames = PinnedLayout.frames(count: others.count, kind: kind, around: pinFrame, in: visible, mins: mins) {
+                        rects[pinned.0] = pinFrame
+                        for (slot, frame) in zip(others, otherFrames) { rects[slot] = frame }
+                        let reason = kind == requested ? nil : "\(requested.rawValue) does not match the pinned window"
+                        layout = LayoutFrames(rects: [], effective: kind, fallbackReason: reason)
+                        appliedPin = pinned.1
+                    } else {
+                        layout = LayoutFrames(rects: [], effective: .auto, fallbackReason: "pinned window leaves no safe space")
+                    }
+                }
+            }
+            if rects.isEmpty {
+                let mins = found.map { minimumSize(for: room.windows[$0].bundleID) }
+                layout = frames(for: room, slots: found, kind: room.layout(on: snap.screens[here].uuid), in: visible, mins: mins)
+                for (k, r) in layout.rects.enumerated() { rects[found[k]] = r }
             }
         }
         let placements = room.windows.indices.compactMap { i -> Placement? in
@@ -233,7 +280,7 @@ final class WindowEngine {
             return Placement(slot: room.windows[i], rect: rect, window: snap.windows[w])
         }
         let missing = room.windows.indices.filter { assignment[$0] == nil }.map { room.windows[$0] }
-        return Plan(placements: placements, missing: missing, effectiveLayout: layout.effective, layoutFallbackReason: layout.fallbackReason)
+        return Plan(placements: placements, missing: missing, effectiveLayout: layout.effective, layoutFallbackReason: layout.fallbackReason, pin: appliedPin, ignoredPins: ignoredPins)
     }
 
     /// Where a room's open windows go with `kind`. A layout chosen on another screen,
@@ -285,6 +332,24 @@ final class WindowEngine {
         let screen = snap.screens[activeScreenIndex(in: snap.screens)]
         let assignment = assign(room, to: snap.windows)
         let present = room.windows.indices.filter { assignment[$0] != nil }
+        if let slot = present.first(where: { index in
+            assignment[index].flatMap { live in pins().contains { $0.matches(snap.windows[live].info) } } ?? false
+        }), let live = assignment[slot], let pin = pins().first(where: { $0.matches(snap.windows[live].info) }) {
+            let pinFrame = Tiler.clamp(Geometry.resolve(pin.frame, in: screen.visible), into: screen.visible)
+            let others = present.filter { $0 != slot }
+            let mins = others.map { minimumSize(for: room.windows[$0].bundleID) }
+            let allMins = present.map { minimumSize(for: room.windows[$0].bundleID) }
+            let mine = frames(for: room, slots: present, kind: .mine, in: screen.visible, mins: allMins)
+            let pinAt = present.firstIndex(of: slot)!
+            let keepsMine = mine.effective == .mine
+                && PinnedLayout.keepingMyLayout(mine.rects, pinAt: pinAt, pin: pinFrame, in: screen.visible) != nil
+            guard let free = PinnedLayout.largestFreeRegion(around: pinFrame, in: screen.visible) else { return keepsMine ? [.auto, .mine] : [.auto] }
+            return LayoutKind.allCases.filter { kind in
+                if kind == .mine { return keepsMine }
+                guard kind != .saved else { return false }
+                return kind == .auto || kind == .stack || Tiler.fits(count: others.count, kind: kind, in: free, mins: mins)
+            }
+        }
         let n = present.count
         let current = room.layout(on: screen.uuid)
         let mins = present.map { minimumSize(for: room.windows[$0].bundleID) }
@@ -500,7 +565,9 @@ final class WindowEngine {
         if cameBack { saveLedger() }
         report.milliseconds = Int(Date().timeIntervalSince(start) * 1000)
         let fallback = planned.layoutFallbackReason.map { "; fallback: \($0)" } ?? ""
-        Log.file("Arranged \(room.name) (\(planned.effectiveLayout.rawValue)): \(report.placed) placed, \(report.parked) parked, \(report.hiddenApps) apps hidden, re-applied [\(off.joined(separator: ", "))], missing [\(report.missing.joined(separator: ", "))]\(fallback) in \(report.milliseconds) ms")
+        let layoutName = planned.pin == nil ? planned.effectiveLayout.rawValue : "pinned + \(planned.effectiveLayout.rawValue)"
+        let ignored = planned.ignoredPins > 0 ? "; ignored \(planned.ignoredPins) additional pin(s)" : ""
+        Log.file("Arranged \(room.name) (\(layoutName)): \(report.placed) placed, \(report.parked) parked, \(report.hiddenApps) apps hidden, re-applied [\(off.joined(separator: ", "))], missing [\(report.missing.joined(separator: ", "))]\(fallback)\(ignored) in \(report.milliseconds) ms")
         for p in placements {
             let a = AX.frame(p.window.element) ?? .zero
             Log.file("  \(p.window.app.localizedName ?? ""): wanted \(Int(p.rect.width))×\(Int(p.rect.height)) @\(Int(p.rect.minX)),\(Int(p.rect.minY))  got \(Int(a.width))×\(Int(a.height)) @\(Int(a.minX)),\(Int(a.minY))")

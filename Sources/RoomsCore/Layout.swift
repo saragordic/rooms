@@ -273,3 +273,73 @@ public enum Tiler {
         return rounded
     }
 }
+
+/// Places a room's unpinned windows in the rectangular space around one fixed
+/// window. Each edge region is independent, so no unpinned window can overlap the
+/// reserved rectangle.
+public enum PinnedLayout {
+    public static func largestFreeRegion(around pinned: CGRect, in area: CGRect) -> CGRect? {
+        guard !pinned.isNull, area.contains(pinned) else { return nil }
+        return [
+            CGRect(x: area.minX, y: area.minY, width: area.width, height: pinned.minY - area.minY),
+            CGRect(x: area.minX, y: pinned.maxY, width: area.width, height: area.maxY - pinned.maxY),
+            CGRect(x: area.minX, y: pinned.minY, width: pinned.minX - area.minX, height: pinned.height),
+            CGRect(x: pinned.maxX, y: pinned.minY, width: area.maxX - pinned.maxX, height: pinned.height),
+        ].filter { $0.width >= Tiler.usable.width && $0.height >= Tiler.usable.height }
+            .max { $0.width * $0.height < $1.width * $1.height }
+    }
+
+    /// Replaces a hand-saved window with its pin when every other frame leaves a
+    /// normal layout gap around it. Nil keeps the caller on the safe tiled fallback.
+    public static func keepingMyLayout(_ frames: [CGRect], pinAt index: Int, pin: CGRect, in area: CGRect, gap: CGFloat = Tiler.gap) -> [CGRect]? {
+        guard frames.indices.contains(index), !pin.isNull, pin.width > 0, pin.height > 0,
+              area.contains(pin) else { return nil }
+        var kept = frames
+        kept[index] = pin
+        // A one-point tolerance avoids rejecting the rounding that occurs when a
+        // fractional pin is resolved on a display, while retaining a visible gap.
+        let reserved = pin.insetBy(dx: -(gap - 1), dy: -(gap - 1))
+        guard kept.indices.allSatisfy({ $0 == index || !kept[$0].intersects(reserved) }) else { return nil }
+        let safeArea = area.insetBy(dx: Tiler.gap - 1, dy: Tiler.gap - 1)
+        return Tiler.isClean(kept, in: safeArea) ? kept : nil
+    }
+
+    public static func frames(count n: Int, kind: LayoutKind, around pinned: CGRect, in area: CGRect, mins: [CGSize] = []) -> [CGRect]? {
+        guard let free = largestFreeRegion(around: pinned, in: area) else { return nil }
+        return Tiler.frames(count: n, kind: kind, in: free, mins: mins).allSatisfy(free.contains)
+            ? Tiler.frames(count: n, kind: kind, in: free, mins: mins) : nil
+    }
+
+    public static func frames(count n: Int, around pinned: CGRect, in area: CGRect, mins: [CGSize] = []) -> [CGRect]? {
+        guard n >= 0, !pinned.isNull, area.contains(pinned) else { return nil }
+        guard n > 0 else { return [] }
+        let mins = mins.count == n ? mins : Array(repeating: .zero, count: n)
+        let regions = [
+            CGRect(x: area.minX, y: area.minY, width: area.width, height: pinned.minY - area.minY),
+            CGRect(x: area.minX, y: pinned.maxY, width: area.width, height: area.maxY - pinned.maxY),
+            CGRect(x: area.minX, y: pinned.minY, width: pinned.minX - area.minX, height: pinned.height),
+            CGRect(x: pinned.maxX, y: pinned.minY, width: area.maxX - pinned.maxX, height: pinned.height),
+        ].filter { $0.width >= Tiler.usable.width && $0.height >= Tiler.usable.height }
+        guard !regions.isEmpty else { return nil }
+
+        var assignments = Array(repeating: [Int](), count: regions.count)
+        for index in 0..<n {
+            // Spread windows by available area so a large side of the pin takes more
+            // of the room, while small strips are not overfilled first.
+            let target = assignments.indices.max { left, right in
+                let leftSpace = regions[left].width * regions[left].height / CGFloat(assignments[left].count + 1)
+                let rightSpace = regions[right].width * regions[right].height / CGFloat(assignments[right].count + 1)
+                return leftSpace < rightSpace
+            }!
+            assignments[target].append(index)
+        }
+
+        var result = Array(repeating: CGRect.zero, count: n)
+        for (region, indexes) in zip(regions, assignments) where !indexes.isEmpty {
+            let frames = Tiler.frames(count: indexes.count, kind: .auto, in: region, mins: indexes.map { mins[$0] })
+            guard frames.allSatisfy(region.contains) else { return nil }
+            for (index, frame) in zip(indexes, frames) { result[index] = frame }
+        }
+        return result
+    }
+}

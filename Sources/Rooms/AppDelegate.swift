@@ -26,6 +26,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let defaults = UserDefaults.standard
     private var rooms: [Room] = []
     private var loadError: String?
+    private var pinCandidate: WindowPin?
+    private var pinCandidateName = "window"
+
+    private var pinnedWindows: [WindowPin] {
+        get {
+            guard let data = defaults.data(forKey: "pinnedWindows"),
+                  let pins = try? JSONDecoder().decode([WindowPin].self, from: data) else { return [] }
+            return pins
+        }
+        set { defaults.set(try? JSONEncoder().encode(newValue), forKey: "pinnedWindows") }
+    }
 
     private var currentRoomID: String? {
         get { defaults.string(forKey: "currentRoom") }
@@ -71,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         engine.claimedWindows = { [unowned self] room in
             Set(rooms.filter { $0.id != room.id }.flatMap { $0.windows.compactMap(\.windowID) })
         }
+        engine.pins = { [unowned self] in pinnedWindows }
         picker.onNameSettled = { [unowned self] name in
             guard !name.isEmpty, rooms.allSatisfy({ Matcher.fold($0.name) != Matcher.fold(name) }),
                   let template = RoomTemplate.matching(name) else { return }
@@ -602,6 +614,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(item("Show Everything", #selector(showAll)))
+        if let focused = engine.focusedWindow(), let pin = engine.pin(for: focused) {
+            pinCandidate = pin
+            pinCandidateName = focused.title.isEmpty ? (focused.app.localizedName ?? "window") : focused.title
+            let existing = pinnedWindows.contains(where: { $0.matches(focused.info) })
+            menu.addItem(item(existing ? "Unpin \(pinCandidateName)" : "Pin \(pinCandidateName) Here", #selector(togglePin)))
+        } else {
+            pinCandidate = nil
+        }
 
         let snapMenu = NSMenu()
         for (i, b) in SnapBinding.all.enumerated() {
@@ -663,6 +683,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             engine.restoreEverything()
             currentRoomID = nil
             updateStatusTitle()
+        }
+    }
+
+    @objc private func togglePin() {
+        guard let candidate = pinCandidate else { return }
+        var pins = pinnedWindows
+        if let index = pins.firstIndex(where: { $0.matches(WindowInfo(bundleID: candidate.bundleID, title: candidate.title, windowID: candidate.windowID)) }) {
+            pins.remove(at: index)
+            pinnedWindows = pins
+            toast.show("Unpinned \(pinCandidateName)")
+        } else {
+            pins.append(candidate)
+            pinnedWindows = pins
+            toast.show("Pinned \(pinCandidateName)", detail: "It stays here in every room where it appears")
         }
     }
 
