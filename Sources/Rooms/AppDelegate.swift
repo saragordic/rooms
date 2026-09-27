@@ -32,6 +32,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         set { defaults.set(newValue, forKey: "currentRoom") }
     }
 
+    /// Bringing an app to the front (⌘Tab, Dock, a launcher) walks into its room.
+    private var followAppSwitches: Bool {
+        get { defaults.bool(forKey: "followAppSwitches") }
+        set { defaults.set(newValue, forKey: "followAppSwitches") }
+    }
+    /// A switch is moving windows. Apps it brings forward must not be followed.
+    private var walking = false
+    private var lastWalkEnded = Date.distantPast
+
     private var recency: [String: Date] {
         get { (defaults.dictionary(forKey: "roomRecency") as? [String: Double] ?? [:]).mapValues(Date.init(timeIntervalSince1970:)) }
         set { defaults.set(newValue.mapValues(\.timeIntervalSince1970), forKey: "roomRecency") }
@@ -122,6 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Plugging in (or unplugging) a monitor re-lays out the room you're in.
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(appActivated(_:)), name: NSWorkspace.didActivateApplicationNotification, object: nil)
         lastScreens = NSScreen.screens.map(\.frame)
         let shortcut = Shortcut.named(defaults.string(forKey: "shortcut"))
         if !HotkeyCenter.shared.register(shortcut) { warnShortcutTaken(shortcut) }
@@ -209,6 +219,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !room.windows.isEmpty, !AX.isTrusted {
             askForAccessibility(reason: "to put \(room.name)'s windows back in place. Until then, Rooms switches whole apps.")
         }
+        walking = true
+        defer {
+            walking = false
+            lastWalkEnded = Date()
+        }
         let report = await Switcher.walk(into: room, engine: engine)
         if let arranged = report.arranged, !room.windows.isEmpty {
             let placed = arranged.placed == 1 ? "1 window" : "\(arranged.placed) windows"
@@ -220,6 +235,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // The windows have moved under the preview; let it fade away.
         preview.hide(animated: true, delay: 0.05)
         markCurrent(room)
+    }
+
+    // MARK: Following app switches
+
+    @objc private func appActivated(_ note: Notification) {
+        guard followAppSwitches, AX.isTrusted, currentRoomID != nil, !walking,
+              Date().timeIntervalSince(lastWalkEnded) > 1,   // the last switch's own activations
+              !palette.isVisible, !picker.isVisible,              // choosing or editing a room
+              let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              app != .current, let bundleID = app.bundleIdentifier else { return }
+        guard let room = AppFollow.room(for: bundleID, in: rooms, current: currentRoomID, recency: recency) else { return }
+        Log.file("Follow \(app.localizedName ?? bundleID) into \(room.name)")
+        inTurn { [unowned self] in
+            // Another switch may have landed while this one waited its turn.
+            guard AppFollow.room(for: bundleID, in: rooms, current: currentRoomID, recency: recency)?.id == room.id else { return }
+            await walk(into: room)
+            // Stay on the app you chose, not the room's first window.
+            app.activate()
+        }
+    }
+
+    @objc private func toggleFollowAppSwitches() {
+        followAppSwitches.toggle()
+        toast.show(followAppSwitches ? "Following app switches" : "Not following app switches",
+                   detail: followAppSwitches ? "Bring up an app from another room and Rooms goes there" : nil)
     }
 
     // MARK: Snapping
@@ -618,6 +658,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let snapItem = NSMenuItem(title: "Snap Window", action: nil, keyEquivalent: "")
         snapItem.submenu = snapMenu
         menu.addItem(snapItem)
+
+        let follow = item("Follow App Switches", #selector(toggleFollowAppSwitches))
+        follow.state = followAppSwitches ? .on : .off
+        follow.toolTip = "When you bring up an app from another room (⌘Tab, Dock, a launcher), go to that room. Apps in several rooms go to the one you used last"
+        menu.addItem(follow)
 
         menu.addItem(item("Edit Rooms…", #selector(editRooms), key: ","))
 
