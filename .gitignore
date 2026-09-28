@@ -7,6 +7,8 @@ build/
 results/
 Tools/desksnap
 HANDOFF.md
+# Planning notes stay local
+docs/*-Plan.md
 # Brand explorations stay private; only design/menu-bar-icon.svg ships.
 docs/brand/
 # Screen recordings stay local (they show real windows)

@@ -68,7 +68,7 @@ I built this on my Mac and use it all day, but there are still rough edges:
 - Some apps won't shrink below a minimum size. On a small screen with many windows, Stack may be the only layout that fits.
 - Spaces and full-screen windows aren't managed; Rooms works with ordinary windows on the current Space.
 - Stage Manager fights with any window manager. Rooms warns you when it's on.
-- ⌥Space replaces the usual way of typing a non-breaking space. Pick another shortcut under **Keyboard Shortcut** in the menu if you need it.
+- ⌥Space replaces the usual way of typing a non-breaking space. Choose another from **Keyboard Shortcut…** in the menu, or on the welcome screen the first time Rooms opens.
 
 It's built for **macOS 14 or later, on Apple Silicon and Intel**. I've tested it on Apple Silicon with macOS 26; older macOS versions and Intel Macs haven't had the same hands-on testing.
 
