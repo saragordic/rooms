@@ -22,6 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var windowWork: Task<Void, Never>?
     /// Parked windows from a previous run have been looked for (needs Accessibility).
     private var recovered = false
+    /// A switch is moving windows. Windows it focuses aren't your own choice.
+    private var walking = false
+    /// Brings a parked window back when you choose it inside its app.
+    private let focusWatch = FocusWatch()
     private var iconCache: [String: NSImage] = [:]
     private let defaults = UserDefaults.standard
     private var rooms: [Room] = []
@@ -122,6 +126,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Plugging in (or unplugging) a monitor re-lays out the room you're in.
         NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        focusWatch.onFocusChange = { [unowned self] in
+            // A switch focuses windows as it arranges them; only your own choices count.
+            guard AX.isTrusted, !walking, let win = engine.focusedWindow() else { return }
+            engine.bringBackIfParked(win)
+        }
         lastScreens = NSScreen.screens.map(\.frame)
         let shortcut = Shortcut.named(defaults.string(forKey: "shortcut"))
         if !HotkeyCenter.shared.register(shortcut) { warnShortcutTaken(shortcut) }
@@ -209,6 +218,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !room.windows.isEmpty, !AX.isTrusted {
             askForAccessibility(reason: "to put \(room.name)'s windows back in place. Until then, Rooms switches whole apps.")
         }
+        walking = true
+        defer { walking = false }
         let report = await Switcher.walk(into: room, engine: engine)
         if let arranged = report.arranged, !room.windows.isEmpty {
             let placed = arranged.placed == 1 ? "1 window" : "\(arranged.placed) windows"

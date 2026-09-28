@@ -697,6 +697,18 @@ final class WindowEngine {
         }
     }
 
+    /// Puts a parked window back on screen when you bring it to the front yourself
+    /// (an app's Window menu, ⌘`), so choosing it never lands you in an invisible
+    /// window. It stays out of the room: the next switch parks it again.
+    @discardableResult
+    func bringBackIfParked(_ win: LiveWindow) -> Bool {
+        guard let id = win.windowID, ledger.entries[id]?.bundleID == win.bundleID else { return false }
+        unpark(win)
+        saveLedger()
+        Log.file("Brought back \(win.app.localizedName ?? win.bundleID) “\(win.title)”: chosen while parked")
+        return true
+    }
+
     /// Brings every parked window back. Entries for windows that are gone (their app
     /// quit) are dropped; any window that didn't come back stays recorded for next time.
     private func unparkAll() {
