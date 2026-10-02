@@ -34,19 +34,29 @@ public enum GridLayout {
             let y = cells[i].row < cells[j].row + cells[j].rows && cells[j].row < cells[i].row + cells[i].rows
             if x && y { return nil }
         } }
-        return fillingHoles(cells)
+        // Close the slivers left by windows that weren't quite touching, but keep space
+        // you left empty on purpose (Bambu Studio on the left, the right half free).
+        return fillingHoles(cells, upTo: 1)
     }
 
     /// Grows windows into empty grid space beside them, so a layout never keeps a gap
-    /// that was only there because the windows weren't quite touching.
-    public static func fillingHoles(_ cells: [GridCell]) -> [GridCell] {
+    /// that was only there because the windows weren't quite touching. `maxGap`: only
+    /// gaps up to this many units wide are closed; wider ones are left empty.
+    public static func fillingHoles(_ cells: [GridCell], upTo maxGap: Int = units) -> [GridCell] {
         guard valid(cells) else { return cells }
         var cells = cells
+        let maxGap = max(1, maxGap)
         func free(_ col: Int, _ row: Int, except i: Int) -> Bool {
             guard (0..<units).contains(col), (0..<units).contains(row) else { return false }
             return !cells.indices.contains { j in
                 j != i && col >= cells[j].col && col < cells[j].col + cells[j].cols && row >= cells[j].row && row < cells[j].row + cells[j].rows
             }
+        }
+        // How many empty columns (or rows) lie beside a window, starting at `from`.
+        func run(_ from: Int, step: Int, _ isFree: (Int) -> Bool) -> Int {
+            var n = 0, k = from
+            while isFree(k) { n += 1; k += step }
+            return n
         }
         var grew = true
         while grew {
@@ -54,12 +64,14 @@ public enum GridLayout {
             for i in cells.indices {
                 let c = cells[i]
                 let rows = c.row..<(c.row + c.rows)
-                if rows.allSatisfy({ free(c.col - 1, $0, except: i) }) { cells[i].col -= 1; cells[i].cols += 1; grew = true }
-                if rows.allSatisfy({ free(c.col + c.cols, $0, except: i) }) { cells[i].cols += 1; grew = true }
+                let colFree = { (col: Int) in rows.allSatisfy { free(col, $0, except: i) } }
+                if (1...maxGap).contains(run(c.col - 1, step: -1, colFree)) { cells[i].col -= 1; cells[i].cols += 1; grew = true }
+                if (1...maxGap).contains(run(c.col + c.cols, step: 1, colFree)) { cells[i].cols += 1; grew = true }
                 // Include newly grown columns when checking the corners.
                 let cols = cells[i].col..<(cells[i].col + cells[i].cols)
-                if cols.allSatisfy({ free($0, c.row - 1, except: i) }) { cells[i].row -= 1; cells[i].rows += 1; grew = true }
-                if cols.allSatisfy({ free($0, c.row + c.rows, except: i) }) { cells[i].rows += 1; grew = true }
+                let rowFree = { (row: Int) in cols.allSatisfy { free($0, row, except: i) } }
+                if (1...maxGap).contains(run(c.row - 1, step: -1, rowFree)) { cells[i].row -= 1; cells[i].rows += 1; grew = true }
+                if (1...maxGap).contains(run(c.row + c.rows, step: 1, rowFree)) { cells[i].rows += 1; grew = true }
             }
         }
         return cells

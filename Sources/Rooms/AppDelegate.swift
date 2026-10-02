@@ -425,8 +425,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             new.about = about.isEmpty ? template?.about : about
             base = new
         }
-        // The picker's numbers set the order; how the windows sit on screen sets the layout.
-        var (room, reading) = engine.learn(base, windows: chosen, keepOrder: true)
+        // The picker's numbers set the order. A new room learns its layout from how the
+        // windows sit on screen; an existing one keeps the arrangement you already made
+        // (⌘S is what remembers a new one), and windows you add slot in around it.
+        let key = HotkeyCenter.shared.current?.label ?? "⌥ Space"
+        var room: Room
+        let detail: String
+        if existing != nil, !base.windows.isEmpty {
+            let edit = engine.edit(base, windows: chosen)
+            room = edit.room
+            detail = edit.floating > 0
+                ? "Kept your arrangement · New windows float on top: place them, then \(key) and ⌘S"
+                : "Kept your arrangement · To change the layout: \(key), then Tab"
+        } else {
+            let (learned, reading) = engine.learn(base, windows: chosen, keepOrder: true)
+            room = learned
+            detail = layoutPhrase(reading) + " · To change the layout: \(key), then Tab"
+        }
         // Editing: what you wrote replaces the description, including clearing it.
         if existing != nil { room.about = about.isEmpty ? nil : about } else if !about.isEmpty { room.about = about }
         if let i = all.firstIndex(where: { $0.id == room.id }) { all[i] = room } else { all.append(room) }
@@ -437,13 +452,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             registerRoomKeys()
             Log.file("Saved \(room.name): " + room.windows.map { "\($0.app ?? $0.bundleID) “\($0.title)”" }.joined(separator: ", "))
             let count = room.windows.count == 1 ? "1 window" : "\(room.windows.count) windows"
-            let key = HotkeyCenter.shared.current?.label ?? "⌥ Space"
             // You walk into the room you just made: its windows come to this display
             // and lay out, and everything else steps back, as on any switch.
             markCurrent(room)
             _ = await Switcher.walk(into: room, engine: engine)
             toast.show("Saved \(room.name) · \(count)",
-                       detail: layoutPhrase(reading) + " · To change the layout: \(key), then Tab")
+                       detail: detail)
         } catch {
             alert("Couldn't save the room", error.localizedDescription)
         }

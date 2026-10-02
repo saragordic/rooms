@@ -147,6 +147,43 @@ final class WindowEngine {
         return (updated, reading)
     }
 
+    /// Changes which windows a room has (Save in the picker on an existing room) and
+    /// keeps the arrangement you made: windows that stay keep their places and the
+    /// room keeps its layouts. In My Layout a new window takes the biggest free part of
+    /// the grid; with none free it floats on top until you arrange it and press ⌘S.
+    /// Space a removed window leaves stays free for the next one.
+    /// `floating`: new windows with no place in My Layout.
+    func edit(_ room: Room, windows wins: [LiveWindow]) -> (room: Room, added: Int, floating: Int) {
+        var previous = [Int?](repeating: nil, count: wins.count)
+        for (slot, win) in assign(room, to: wins) { previous[win] = slot }
+        var windows = RoomEdit.merge(existing: room.windows, chosen: slots(for: wins), previous: previous)
+        let added = previous.indices.filter { previous[$0] == nil }
+        let usesMine = room.layout == .mine || room.layoutByDisplay.values.contains(.mine)
+        let screens = ScreenInfo.all()
+        if usesMine, !screens.isEmpty {
+            let visible = screens[activeScreenIndex(in: screens)].visible
+            for i in added {
+                guard let free = RoomEdit.freeCell(around: windows.compactMap(\.cell)) else { break }
+                var trial = windows
+                trial[i].cell = free
+                // Only if the whole layout still draws cleanly with it, apps' minimum sizes included.
+                let celled = trial.filter { $0.cell != nil }
+                if MineLayout.frames(cells: celled.map(\.cell), in: visible, mins: celled.map { minimumSize(for: $0.bundleID) }) != nil {
+                    windows = trial
+                }
+            }
+        }
+        var updated = room
+        updated.windows = windows
+        var apps: [AppRef] = []
+        for slot in windows where !apps.contains(where: { $0.bundleID == slot.bundleID }) { apps.append(AppRef(slot.bundleID, name: slot.app)) }
+        updated.apps = apps
+        let floating = usesMine ? added.filter { windows[$0].cell == nil }.count : 0
+        let detail = usesMine ? " (\(added.count - floating) into free space, \(floating) floating)" : ""
+        Log.file("Edited \(room.name): kept the arrangement, \(added.count) added\(detail), order \(wins.map { $0.app.localizedName ?? "" })")
+        return (updated, added.count, floating)
+    }
+
     /// The room's windows as they are on screen right now.
     func openWindows(of room: Room) -> [LiveWindow] {
         let windows = inventory()
@@ -206,6 +243,8 @@ final class WindowEngine {
         let missing: [WindowSlot]
         let effectiveLayout: LayoutKind
         let layoutFallbackReason: String?
+        /// Windows floating on top of My Layout (no saved cell yet), by app name.
+        var floating: [String] = []
     }
 
     func snapshot() -> Snapshot { Snapshot(screens: ScreenInfo.all(), windows: inventory()) }
@@ -220,20 +259,37 @@ final class WindowEngine {
         let found = room.windows.indices.filter { assignment[$0] != nil }
         var rects: [Int: CGRect] = [:]
         var layout = LayoutFrames(rects: [], effective: room.layout(on: snap.screens[here].uuid), fallbackReason: nil)
+        var floating: [Int] = []
         if !found.isEmpty {
             let visible = snap.screens[here].visible
-            let mins = found.map { minimumSize(for: room.windows[$0].bundleID) }
-            layout = frames(for: room, slots: found, kind: room.layout(on: snap.screens[here].uuid), in: visible, mins: mins)
-            for (k, r) in layout.rects.enumerated() {
-                rects[found[k]] = r
+            // My Layout: a window added since it was made has no cell. It floats on top,
+            // where you can arrange it and press ⌘S, instead of Auto taking over the room.
+            if room.layout(on: snap.screens[here].uuid) == .mine {
+                floating = RoomEdit.floating(cells: found.map { room.windows[$0].cell }).map { found[$0] }
+                // Only while the rest still draws as My Layout; otherwise Auto lays out every window.
+                let rest = found.filter { !floating.contains($0) }
+                if !floating.isEmpty, frames(for: room, slots: rest, kind: .mine, in: visible, mins: rest.map { minimumSize(for: room.windows[$0].bundleID) }).effective != .mine {
+                    floating = []
+                }
             }
+            let laidOut = found.filter { !floating.contains($0) }
+            let mins = laidOut.map { minimumSize(for: room.windows[$0].bundleID) }
+            layout = frames(for: room, slots: laidOut, kind: room.layout(on: snap.screens[here].uuid), in: visible, mins: mins)
+            for (k, r) in layout.rects.enumerated() {
+                rects[laidOut[k]] = r
+            }
+            for slot in floating { if let w = assignment[slot] { rects[slot] = RoomEdit.floatingFrame(snap.windows[w].frame, in: visible) } }
         }
-        let placements = room.windows.indices.compactMap { i -> Placement? in
+        // Floating windows go first, so they end up on top of the layout.
+        let order = floating + room.windows.indices.filter { !floating.contains($0) }
+        let placements = order.compactMap { i -> Placement? in
             guard let w = assignment[i], let rect = rects[i] else { return nil }
             return Placement(slot: room.windows[i], rect: rect, window: snap.windows[w])
         }
         let missing = room.windows.indices.filter { assignment[$0] == nil }.map { room.windows[$0] }
-        return Plan(placements: placements, missing: missing, effectiveLayout: layout.effective, layoutFallbackReason: layout.fallbackReason)
+        var plan = Plan(placements: placements, missing: missing, effectiveLayout: layout.effective, layoutFallbackReason: layout.fallbackReason)
+        plan.floating = floating.map { room.windows[$0].app ?? room.windows[$0].bundleID }
+        return plan
     }
 
     /// Where a room's open windows go with `kind`. A layout chosen on another screen,
@@ -298,10 +354,14 @@ final class WindowEngine {
         for kind in LayoutKind.allCases {
             switch kind {
             case .mine:
-                // Offered only where it draws cleanly (see `frames(for:)`).
-                let layout = frames(for: room, slots: present, kind: .mine, in: screen.visible, mins: mins)
+                // Offered only where it draws cleanly (see `frames(for:)`). Windows added
+                // since it was made float on top of it, so they don't count here.
+                let floating = Set(RoomEdit.floating(cells: present.map { room.windows[$0].cell }))
+                let celled = present.indices.filter { !floating.contains($0) }
+                let celledMins = celled.map { mins[$0] }
+                let layout = frames(for: room, slots: celled.map { present[$0] }, kind: .mine, in: screen.visible, mins: celledMins)
                 if layout.effective == .mine,
-                   layout.rects != Tiler.frames(count: n, kind: .auto, in: screen.visible, mins: mins) {
+                   layout.rects != Tiler.frames(count: celled.count, kind: .auto, in: screen.visible, mins: celledMins) {
                     choices.append(kind)
                 }
             case .saved:
@@ -500,7 +560,8 @@ final class WindowEngine {
         if cameBack { saveLedger() }
         report.milliseconds = Int(Date().timeIntervalSince(start) * 1000)
         let fallback = planned.layoutFallbackReason.map { "; fallback: \($0)" } ?? ""
-        Log.file("Arranged \(room.name) (\(planned.effectiveLayout.rawValue)): \(report.placed) placed, \(report.parked) parked, \(report.hiddenApps) apps hidden, re-applied [\(off.joined(separator: ", "))], missing [\(report.missing.joined(separator: ", "))]\(fallback) in \(report.milliseconds) ms")
+        let floats = planned.floating.isEmpty ? "" : "; floating [\(planned.floating.joined(separator: ", "))]"
+        Log.file("Arranged \(room.name) (\(planned.effectiveLayout.rawValue)): \(report.placed) placed, \(report.parked) parked, \(report.hiddenApps) apps hidden, re-applied [\(off.joined(separator: ", "))], missing [\(report.missing.joined(separator: ", "))]\(fallback)\(floats) in \(report.milliseconds) ms")
         for p in placements {
             let a = AX.frame(p.window.element) ?? .zero
             Log.file("  \(p.window.app.localizedName ?? ""): wanted \(Int(p.rect.width))×\(Int(p.rect.height)) @\(Int(p.rect.minX)),\(Int(p.rect.minY))  got \(Int(a.width))×\(Int(a.height)) @\(Int(a.minX)),\(Int(a.minY))")
